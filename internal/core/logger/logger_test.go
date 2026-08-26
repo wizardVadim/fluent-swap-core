@@ -11,7 +11,6 @@ import (
 )
 
 func TestNewLogger_WritesMessageToFile(t *testing.T) {
-
 	originalLogDir := logger_pack.LOG_DIR
 	logger_pack.LOG_DIR = t.TempDir()
 

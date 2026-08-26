@@ -16,7 +16,6 @@ const (
 )
 
 func NewLanguage(code LanguageCode) (Language, error) {
-
 	language := Language{code: LanguageCode(strings.ToLower(strings.TrimSpace(string(code))))}
 
 	if err := language.validate(); err != nil {
@@ -24,7 +23,6 @@ func NewLanguage(code LanguageCode) (Language, error) {
 	}
 
 	return language, nil
-
 }
 
 func (l Language) Code() LanguageCode {
@@ -32,20 +30,16 @@ func (l Language) Code() LanguageCode {
 }
 
 func (l Language) validate() error {
-
 	switch l.code {
 	case LanguageCodeEN, LanguageCodeRU:
 		return nil
 	default:
 		return ErrInvalidLanguageCode
 	}
-
 }
 
 func (l Language) IsEqual(comparable Language) bool {
-
 	return l.code == comparable.code
-
 }
 
 type LanguagePair struct {
@@ -54,7 +48,6 @@ type LanguagePair struct {
 }
 
 func NewLanguagePair(nativeLanguage Language, learningLanguage Language) (LanguagePair, error) {
-
 	languagePair := LanguagePair{
 		nativeLanguage:   nativeLanguage,
 		learningLanguage: learningLanguage,
@@ -65,7 +58,6 @@ func NewLanguagePair(nativeLanguage Language, learningLanguage Language) (Langua
 	}
 
 	return languagePair, nil
-
 }
 
 func (lp LanguagePair) validate() error {
@@ -93,11 +85,9 @@ func (lp LanguagePair) LearningLanguage() Language {
 }
 
 func (lp LanguagePair) IsCompatibleWith(lp2 LanguagePair) bool {
-
 	if lp.learningLanguage.IsEqual(lp2.nativeLanguage) && lp.nativeLanguage.IsEqual(lp2.learningLanguage) {
 		return true
 	}
 
 	return false
-
 }
