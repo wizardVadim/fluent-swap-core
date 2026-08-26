@@ -1,0 +1,9 @@
+# Environment
+.env
+
+# AI Agents
+AGENTS.md
+/agents-help
+
+# Out data
+/out
