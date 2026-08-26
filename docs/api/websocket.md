@@ -19,8 +19,6 @@ EP подключения еще не описан
 
 ## Описание документов
 
-===
-
 ### `find_partner` — client → server
 
 ```json
@@ -34,8 +32,6 @@ EP подключения еще не описан
 }
 ```
 
-===
-
 ### `search_waiting` — server → client
 
 ```json
@@ -45,8 +41,6 @@ EP подключения еще не описан
 }
 ```
 
-===
-
 ### `cancel_search` — client → server
 
 ```json
@@ -55,8 +49,6 @@ EP подключения еще не описан
   "request_id": "req-1235"
 }
 ```
-
-===
 
 ### `search_cancelled` — server → client
 
@@ -68,8 +60,6 @@ EP подключения еще не описан
 ```
 
 Отмена идемпотентна: отсутствие клиента в очереди не считается ошибкой.
-
-===
 
 ### `match_found` — server → client
 
@@ -84,8 +74,6 @@ EP подключения еще не описан
 ```
 
 Оба участника получают одинаковый `match_id`, но собственные `request_id`.
-
-===
 
 ### `error` — server → client
 
@@ -110,5 +98,3 @@ example: `"code"` -> `"message"` : `str` -> `str`
 `"unknown_message_type"`  -> `"unknown message type"`
 `"invalid_payload"`       -> `"native language code is invalid"`
 `"internal_server_error"` -> `"internal server error"`
-
-===
