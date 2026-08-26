@@ -1,9 +1,9 @@
 package main
 
-import "github.com/wizardVadim/fluent-swap-core/internal/core"
+import logger_pack "github.com/wizardVadim/fluent-swap-core/internal/core/logger"
 
 func main() {
-	logger, close, err := core.NewLogger("INFO")
+	logger, close, err := logger_pack.NewLogger("INFO")
 
 	if err != nil {
 		panic(err)
