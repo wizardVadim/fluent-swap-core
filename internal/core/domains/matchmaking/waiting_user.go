@@ -35,7 +35,6 @@ type WaitingUser struct {
 }
 
 func NewWaitingUser(clientID ClientID, languagePair LanguagePair) (WaitingUser, error) {
-
 	waitingUser := WaitingUser{
 		clientID:     clientID,
 		languagePair: languagePair,
