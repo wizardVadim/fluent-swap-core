@@ -13,6 +13,14 @@
 - `type` хранит наименование типа сообщения
 - `payload` содержит данные необходимые для обработки запроса/ответа
 
+## Подключение
+
+EP подключения еще не описан
+
+## Описание документов
+
+===
+
 ### `find_partner` — client → server
 
 ```json
@@ -26,6 +34,8 @@
 }
 ```
 
+===
+
 ### `search_waiting` — server → client
 
 ```json
@@ -35,6 +45,8 @@
 }
 ```
 
+===
+
 ### `cancel_search` — client → server
 
 ```json
@@ -43,6 +55,8 @@
   "request_id": "req-1235"
 }
 ```
+
+===
 
 ### `search_cancelled` — server → client
 
@@ -54,6 +68,8 @@
 ```
 
 Отмена идемпотентна: отсутствие клиента в очереди не считается ошибкой.
+
+===
 
 ### `match_found` — server → client
 
@@ -69,6 +85,8 @@
 
 Оба участника получают одинаковый `match_id`, но собственные `request_id`.
 
+===
+
 ### `error` — server → client
 
 ```json
@@ -83,5 +101,14 @@
 ```
 
 `request_id` отсутствует, если сервер не смог разобрать JSON и извлечь envelope.
-Минимальные коды: `invalid_json`, `unknown_message_type`, `invalid_payload`,
-`internal_server_error`.
+
+Минимальные коды ошибок: 
+
+example: `"code"` -> `"message"` : `str` -> `str`
+
+`"invalid_json"`          -> `"invalid JSON document"`
+`"unknown_message_type"`  -> `"unknown message type"`
+`"invalid_payload"`       -> `"native language code is invalid"`
+`"internal_server_error"` -> `"internal server error"`
+
+===

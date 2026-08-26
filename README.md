@@ -4,4 +4,4 @@ This is a core of the application helps you find a native speaker to practice yo
 ## API docs
 
 ### Russian
-[Websocket](docs/api/websocket-ru.md)
+[Websocket](docs/api/websocket.md)
