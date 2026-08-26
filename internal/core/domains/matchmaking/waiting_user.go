@@ -29,6 +29,10 @@ func (id ClientID) Value() string {
 	return id.value
 }
 
+func (id ClientID) IsEqual(other ClientID) bool {
+	return id.value == other.value
+}
+
 type WaitingUser struct {
 	clientID     ClientID
 	languagePair LanguagePair

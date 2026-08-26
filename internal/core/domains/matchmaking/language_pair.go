@@ -38,8 +38,8 @@ func (l Language) validate() error {
 	}
 }
 
-func (l Language) IsEqual(comparable Language) bool {
-	return l.code == comparable.code
+func (l Language) IsEqual(other Language) bool {
+	return l.code == other.code
 }
 
 type LanguagePair struct {
@@ -86,6 +86,14 @@ func (lp LanguagePair) LearningLanguage() Language {
 
 func (lp LanguagePair) IsCompatibleWith(lp2 LanguagePair) bool {
 	if lp.learningLanguage.IsEqual(lp2.nativeLanguage) && lp.nativeLanguage.IsEqual(lp2.learningLanguage) {
+		return true
+	}
+
+	return false
+}
+
+func (lp LanguagePair) IsEqual(other LanguagePair) bool {
+	if lp.learningLanguage.IsEqual(other.learningLanguage) && lp.nativeLanguage.IsEqual(other.nativeLanguage) {
 		return true
 	}
 
