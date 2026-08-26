@@ -5,4 +5,5 @@ import "errors"
 var (
 	ErrInvalidLanguageCode = errors.New("invalid language code")
 	ErrEqualLanguages      = errors.New("languages are same")
+	ErrInvalidClientID     = errors.New("invalid client id")
 )
