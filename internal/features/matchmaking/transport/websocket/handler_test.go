@@ -9,20 +9,20 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
-	"github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/repository"
+	matchmakingservice "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
 )
 
 type fakeService struct {
-	findPartner  func(context.Context, matchmaking.WaitingUser) (repository.MatchResult, error)
+	findPartner  func(context.Context, matchmaking.WaitingUser) (matchmakingservice.MatchResult, error)
 	cancelSearch func(context.Context, matchmaking.ClientID) error
 }
 
 func (f *fakeService) FindPartner(
 	ctx context.Context,
 	user matchmaking.WaitingUser,
-) (repository.MatchResult, error) {
+) (matchmakingservice.MatchResult, error) {
 	if f.findPartner == nil {
-		return repository.MatchResult{}, nil
+		return matchmakingservice.MatchResult{}, nil
 	}
 	return f.findPartner(ctx, user)
 }
@@ -39,12 +39,12 @@ func TestWebsocketHandlerFindPartnerReturnsSearchWaiting(t *testing.T) {
 	findCalls := make(chan matchmaking.WaitingUser, 1)
 
 	service := &fakeService{
-		findPartner: func(ctx context.Context, user matchmaking.WaitingUser) (repository.MatchResult, error) {
+		findPartner: func(ctx context.Context, user matchmaking.WaitingUser) (matchmakingservice.MatchResult, error) {
 			if err := ctx.Err(); err != nil {
 				t.Errorf("FindPartner() received cancelled context: %v", err)
 			}
 			findCalls <- user
-			return repository.MatchResult{Matched: false}, nil
+			return matchmakingservice.MatchResult{Matched: false}, nil
 		},
 	}
 
