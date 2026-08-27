@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -9,12 +10,18 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
+	"github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/repository"
 	matchmakingservice "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
 )
 
 type fakeService struct {
 	findPartner  func(context.Context, matchmaking.WaitingUser) (matchmakingservice.MatchResult, error)
 	cancelSearch func(context.Context, matchmaking.ClientID) error
+}
+
+type cancelSearchCall struct {
+	clientID matchmaking.ClientID
+	ctxErr   error
 }
 
 func (f *fakeService) FindPartner(
@@ -48,7 +55,11 @@ func TestWebsocketHandlerFindPartnerReturnsSearchWaiting(t *testing.T) {
 		},
 	}
 
-	conn := openTestConnection(t, NewWebsocketHandler(service, fixedClientIDGenerator(clientID)))
+	conn := openTestConnection(t, NewWebsocketHandler(
+		service,
+		fixedClientIDGenerator(clientID),
+		fixedMatchIDGenerator("unused-match-id"),
+	))
 
 	request := FindPartner{
 		Type:      TypeFindPartner,
@@ -103,7 +114,11 @@ func TestWebsocketHandlerCancelSearchReturnsSearchCancelled(t *testing.T) {
 		},
 	}
 
-	conn := openTestConnection(t, NewWebsocketHandler(service, fixedClientIDGenerator(clientID)))
+	conn := openTestConnection(t, NewWebsocketHandler(
+		service,
+		fixedClientIDGenerator(clientID),
+		fixedMatchIDGenerator("unused-match-id"),
+	))
 
 	request := CancelSearch{Type: TypeCancelSearch, RequestID: "req-cancel-1"}
 	if err := conn.WriteJSON(request); err != nil {
@@ -141,7 +156,11 @@ func TestWebsocketHandlerInvalidJSONKeepsConnectionOpen(t *testing.T) {
 		},
 	}
 
-	conn := openTestConnection(t, NewWebsocketHandler(service, fixedClientIDGenerator(clientID)))
+	conn := openTestConnection(t, NewWebsocketHandler(
+		service,
+		fixedClientIDGenerator(clientID),
+		fixedMatchIDGenerator("unused-match-id"),
+	))
 
 	if err := conn.WriteMessage(gorilla.TextMessage, []byte(`{"type":`)); err != nil {
 		t.Fatalf("write invalid JSON: %v", err)
@@ -181,13 +200,142 @@ func TestWebsocketHandlerInvalidJSONKeepsConnectionOpen(t *testing.T) {
 	}
 }
 
+func TestWebsocketHandlerDisconnectCancelsActiveSearch(t *testing.T) {
+	clientID := newTestClientID(t, "client-disconnect-1")
+	cancelCalls := make(chan cancelSearchCall, 1)
+	service := &fakeService{
+		findPartner: func(context.Context, matchmaking.WaitingUser) (matchmakingservice.MatchResult, error) {
+			return matchmakingservice.MatchResult{Matched: false}, nil
+		},
+		cancelSearch: func(ctx context.Context, gotClientID matchmaking.ClientID) error {
+			cancelCalls <- cancelSearchCall{clientID: gotClientID, ctxErr: ctx.Err()}
+			return nil
+		},
+	}
+
+	conn := openTestConnection(t, NewWebsocketHandler(
+		service,
+		fixedClientIDGenerator(clientID),
+		fixedMatchIDGenerator("unused-match-id"),
+	))
+
+	request := FindPartner{
+		Type:      TypeFindPartner,
+		RequestID: "req-disconnect-1",
+		Payload: FindPartnerPayload{
+			NativeLanguageCode:   "ru",
+			LearningLanguageCode: "en",
+		},
+	}
+	if err := conn.WriteJSON(request); err != nil {
+		t.Fatalf("write find_partner: %v", err)
+	}
+
+	var waiting SearchWaiting
+	if err := conn.ReadJSON(&waiting); err != nil {
+		t.Fatalf("read search_waiting: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close WebSocket: %v", err)
+	}
+
+	select {
+	case call := <-cancelCalls:
+		if !call.clientID.IsEqual(clientID) {
+			t.Errorf("CancelSearch() client ID = %q, want %q", call.clientID.Value(), clientID.Value())
+		}
+		if call.ctxErr != nil {
+			t.Errorf("CancelSearch() received cancelled cleanup context: %v", call.ctxErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CancelSearch() was not called after disconnect")
+	}
+}
+
+func TestWebsocketHandlerMatchFoundNotifiesBothClients(t *testing.T) {
+	firstClientID := newTestClientID(t, "client-match-1")
+	secondClientID := newTestClientID(t, "client-match-2")
+	const matchID = "match-test-1"
+
+	service := matchmakingservice.New(repository.NewMemoryRepository())
+	handler := NewWebsocketHandler(
+		service,
+		sequenceClientIDGenerator(firstClientID, secondClientID),
+		fixedMatchIDGenerator(matchID),
+	)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	firstConn := dialTestConnection(t, server.URL)
+	secondConn := dialTestConnection(t, server.URL)
+
+	firstRequest := FindPartner{
+		Type:      TypeFindPartner,
+		RequestID: "req-match-1",
+		Payload: FindPartnerPayload{
+			NativeLanguageCode:   "ru",
+			LearningLanguageCode: "en",
+		},
+	}
+	if err := firstConn.WriteJSON(firstRequest); err != nil {
+		t.Fatalf("write first find_partner: %v", err)
+	}
+
+	var waiting SearchWaiting
+	if err := firstConn.ReadJSON(&waiting); err != nil {
+		t.Fatalf("read first search_waiting: %v", err)
+	}
+	if waiting.Type != TypeSearchWaiting || waiting.RequestID != firstRequest.RequestID {
+		t.Fatalf("waiting response = %+v, want type %q and request_id %q", waiting, TypeSearchWaiting, firstRequest.RequestID)
+	}
+
+	secondRequest := FindPartner{
+		Type:      TypeFindPartner,
+		RequestID: "req-match-2",
+		Payload: FindPartnerPayload{
+			NativeLanguageCode:   "en",
+			LearningLanguageCode: "ru",
+		},
+	}
+	if err := secondConn.WriteJSON(secondRequest); err != nil {
+		t.Fatalf("write second find_partner: %v", err)
+	}
+
+	var firstMatch MatchFound
+	if err := firstConn.ReadJSON(&firstMatch); err != nil {
+		t.Fatalf("read first match_found: %v", err)
+	}
+	var secondMatch MatchFound
+	if err := secondConn.ReadJSON(&secondMatch); err != nil {
+		t.Fatalf("read second match_found: %v", err)
+	}
+
+	if firstMatch.Type != TypeMatchFound || secondMatch.Type != TypeMatchFound {
+		t.Errorf("match types = (%q, %q), want %q", firstMatch.Type, secondMatch.Type, TypeMatchFound)
+	}
+	if firstMatch.RequestID != firstRequest.RequestID {
+		t.Errorf("first request_id = %q, want %q", firstMatch.RequestID, firstRequest.RequestID)
+	}
+	if secondMatch.RequestID != secondRequest.RequestID {
+		t.Errorf("second request_id = %q, want %q", secondMatch.RequestID, secondRequest.RequestID)
+	}
+	if firstMatch.Payload.MatchID != matchID || secondMatch.Payload.MatchID != matchID {
+		t.Errorf("match IDs = (%q, %q), want %q", firstMatch.Payload.MatchID, secondMatch.Payload.MatchID, matchID)
+	}
+}
+
 func openTestConnection(t *testing.T, handler *WebsocketHandler) *gorilla.Conn {
 	t.Helper()
 
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
+	return dialTestConnection(t, server.URL)
+}
 
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+func dialTestConnection(t *testing.T, serverURL string) *gorilla.Conn {
+	t.Helper()
+
+	wsURL := "ws" + strings.TrimPrefix(serverURL, "http")
 	conn, response, err := gorilla.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		if response != nil {
@@ -209,6 +357,28 @@ func openTestConnection(t *testing.T, handler *WebsocketHandler) *gorilla.Conn {
 func fixedClientIDGenerator(clientID matchmaking.ClientID) ClientIDGenerator {
 	return func() (matchmaking.ClientID, error) {
 		return clientID, nil
+	}
+}
+
+func sequenceClientIDGenerator(clientIDs ...matchmaking.ClientID) ClientIDGenerator {
+	ids := make(chan matchmaking.ClientID, len(clientIDs))
+	for _, clientID := range clientIDs {
+		ids <- clientID
+	}
+	close(ids)
+
+	return func() (matchmaking.ClientID, error) {
+		clientID, ok := <-ids
+		if !ok {
+			return matchmaking.ClientID{}, errors.New("test client ID sequence exhausted")
+		}
+		return clientID, nil
+	}
+}
+
+func fixedMatchIDGenerator(matchID string) MatchIDGenerator {
+	return func() string {
+		return matchID
 	}
 }
 

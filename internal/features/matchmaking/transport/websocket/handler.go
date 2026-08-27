@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
@@ -14,15 +15,27 @@ type WebsocketHandler struct {
 	upgrader          websocket.Upgrader
 	service           Service
 	clientIDGenerator ClientIDGenerator
+	sessions          *sessionRegistry
+	matchIDGenerator  MatchIDGenerator
 }
 
-func NewWebsocketHandler(service Service, clientIDGenerator ClientIDGenerator) *WebsocketHandler {
+func NewWebsocketHandler(
+	service Service,
+	clientIDGenerator ClientIDGenerator,
+	matchIDGenerator MatchIDGenerator,
+) *WebsocketHandler {
 	var upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		},
 	}
-	return &WebsocketHandler{upgrader: upgrader, clientIDGenerator: clientIDGenerator, service: service}
+	return &WebsocketHandler{
+		upgrader:          upgrader,
+		clientIDGenerator: clientIDGenerator,
+		service:           service,
+		sessions:          newSessionRegistry(),
+		matchIDGenerator:  matchIDGenerator,
+	}
 }
 
 func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -33,9 +46,6 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	handlerCtx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
 	clientID, err := h.clientIDGenerator()
 	if err != nil {
 		errorDTO := NewErrorWithoutRequestID("cannot create client ID", ErrorInternalServerError)
@@ -45,10 +55,47 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	session := newClientSession(
+		r.Context(),
+		clientID,
+		conn,
+	)
+
+	defer session.cancel()
+
+	if !h.sessions.register(session) {
+		errorDTO := NewErrorWithoutRequestID(
+			"internal server error",
+			ErrorInternalServerError,
+		)
+
+		if err := conn.WriteJSON(errorDTO); err != nil {
+			return
+		}
+
+		return
+	}
+
+	defer func() {
+		h.sessions.remove(session)
+		searchRequestID := session.takeSearchRequestID()
+		if searchRequestID == "" {
+			return
+		}
+		currentCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := h.service.CancelSearch(currentCtx, session.clientID); err != nil {
+			// log cleanup error when structured logging is added
+			return
+		}
+	}()
+
+	go session.writeLoop()
+
 	//messages reading
 	for {
 		select {
-		case <-handlerCtx.Done():
+		case <-session.ctx.Done():
 			return
 		default:
 		}
@@ -62,7 +109,7 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		if err := json.Unmarshal(message, &envelope); err != nil {
 			errorDTO := NewErrorWithoutRequestID("cannot unmarshal json", ErrorInvalidJSON)
-			if err := conn.WriteJSON(errorDTO); err != nil {
+			if err := session.send(errorDTO); err != nil {
 				return
 			}
 			continue
@@ -75,7 +122,7 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else {
 				errorDTO = NewError("invalid payloads", ErrorInvalidPayload, envelope.RequestID)
 			}
-			if err := conn.WriteJSON(errorDTO); err != nil {
+			if err := session.send(errorDTO); err != nil {
 				return
 			}
 			continue
@@ -83,21 +130,16 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		switch envelope.Type {
 		case TypeFindPartner:
-			if err := h.handleFindPartner(handlerCtx, conn, clientID, envelope); err != nil {
+			if err := h.handleFindPartner(session, envelope); err != nil {
 				return
 			}
 		case TypeCancelSearch:
-			if err := h.handleCancelSearch(
-				handlerCtx,
-				conn,
-				clientID,
-				envelope,
-			); err != nil {
+			if err := h.handleCancelSearch(session, envelope); err != nil {
 				return
 			}
 		default:
 			errorDTO := NewError("unknown message type: "+string(envelope.Type), ErrorUnknownMessageType, envelope.RequestID)
-			if err := conn.WriteJSON(errorDTO); err != nil {
+			if err := session.send(errorDTO); err != nil {
 				return
 			}
 			continue
@@ -107,9 +149,7 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WebsocketHandler) handleCancelSearch(
-	ctx context.Context,
-	conn *websocket.Conn,
-	clientID matchmaking.ClientID,
+	session *clientSession,
 	envelope incomingEnvelope,
 ) error {
 	cs := CancelSearch{
@@ -117,34 +157,34 @@ func (h *WebsocketHandler) handleCancelSearch(
 		RequestID: envelope.RequestID,
 	}
 
-	if err := h.service.CancelSearch(ctx, clientID); err != nil {
+	if err := h.service.CancelSearch(session.ctx, session.clientID); err != nil {
 		errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
-		if err := conn.WriteJSON(errorDTO); err != nil {
+		if err := session.send(errorDTO); err != nil {
 			return err
 		}
 		return nil
 	}
 
+	session.clearSearchRequestID()
+
 	sc := SearchCancelled{
 		Type:      TypeSearchCancelled,
 		RequestID: cs.RequestID,
 	}
-	if err := conn.WriteJSON(sc); err != nil {
+	if err := session.send(sc); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (h *WebsocketHandler) handleFindPartner(
-	ctx context.Context,
-	conn *websocket.Conn,
-	clientID matchmaking.ClientID,
+	session *clientSession,
 	envelope incomingEnvelope,
 ) error {
 	fp, err := incomingEnvelopeToFindPartner(envelope)
 	if err != nil {
 		errorDTO := NewError("invalid find_partner payloads", ErrorInvalidPayload, envelope.RequestID)
-		if err := conn.WriteJSON(errorDTO); err != nil {
+		if err := session.send(errorDTO); err != nil {
 			return err
 		}
 		return nil
@@ -155,7 +195,7 @@ func (h *WebsocketHandler) handleFindPartner(
 	)
 	if err != nil {
 		errorDTO := NewError("invalid find_partner payloads", ErrorInvalidPayload, envelope.RequestID)
-		if err := conn.WriteJSON(errorDTO); err != nil {
+		if err := session.send(errorDTO); err != nil {
 			return err
 		}
 		return nil
@@ -165,7 +205,7 @@ func (h *WebsocketHandler) handleFindPartner(
 	)
 	if err != nil {
 		errorDTO := NewError("invalid find_partner payloads", ErrorInvalidPayload, envelope.RequestID)
-		if err := conn.WriteJSON(errorDTO); err != nil {
+		if err := session.send(errorDTO); err != nil {
 			return err
 		}
 		return nil
@@ -177,32 +217,84 @@ func (h *WebsocketHandler) handleFindPartner(
 	)
 	if err != nil {
 		errorDTO := NewError("invalid find_partner payloads", ErrorInvalidPayload, envelope.RequestID)
-		if err := conn.WriteJSON(errorDTO); err != nil {
+		if err := session.send(errorDTO); err != nil {
 			return err
 		}
 		return nil
 	}
 
-	wu, err := matchmaking.NewWaitingUser(clientID, languagePair)
+	wu, err := matchmaking.NewWaitingUser(session.clientID, languagePair)
 	if err != nil {
 		errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
-		if err := conn.WriteJSON(errorDTO); err != nil {
+		if err := session.send(errorDTO); err != nil {
 			return err
 		}
 		return nil
 	}
 
-	result, err := h.service.FindPartner(ctx, wu)
+	session.setSearchRequestID(fp.RequestID)
+
+	result, err := h.service.FindPartner(session.ctx, wu)
 	if err != nil {
+		session.clearSearchRequestID()
 		errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
-		if err := conn.WriteJSON(errorDTO); err != nil {
+		if err := session.send(errorDTO); err != nil {
 			return err
 		}
 		return nil
 	}
 
 	if result.Matched {
-		// TODO: notify both matched clients
+		session.clearSearchRequestID()
+		partnerSession, success := h.sessions.get(result.Partner.ClientID())
+		if !success {
+			errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
+			if err := session.send(errorDTO); err != nil {
+				return err
+			}
+			return nil
+		}
+
+		currentRequestID := fp.RequestID
+		partnerRequestID := partnerSession.takeSearchRequestID()
+		if partnerRequestID == "" {
+			errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
+			if err := session.send(errorDTO); err != nil {
+				return err
+			}
+			return nil
+		}
+
+		matchID := h.matchIDGenerator()
+
+		currentMatchFound := MatchFound{
+			Type:      TypeMatchFound,
+			RequestID: currentRequestID,
+			Payload: MatchFoundPayload{
+				MatchID: matchID,
+			},
+		}
+
+		partnerMatchFound := MatchFound{
+			Type:      TypeMatchFound,
+			RequestID: partnerRequestID,
+			Payload: MatchFoundPayload{
+				MatchID: matchID,
+			},
+		}
+
+		if err := partnerSession.send(partnerMatchFound); err != nil {
+			errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
+			if err := session.send(errorDTO); err != nil {
+				return err
+			}
+			return nil
+		}
+
+		if err := session.send(currentMatchFound); err != nil {
+			return err
+		}
+
 		return nil
 	}
 
@@ -210,7 +302,7 @@ func (h *WebsocketHandler) handleFindPartner(
 		Type:      TypeSearchWaiting,
 		RequestID: fp.RequestID,
 	}
-	if err := conn.WriteJSON(searchWaitingDTO); err != nil {
+	if err := session.send(searchWaitingDTO); err != nil {
 		return err
 	}
 	return nil

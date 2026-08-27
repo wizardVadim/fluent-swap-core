@@ -13,3 +13,5 @@ type Service interface {
 	FindPartner(ctx context.Context, user matchmaking.WaitingUser) (matchmakingservice.MatchResult, error)
 	CancelSearch(ctx context.Context, clientID matchmaking.ClientID) error
 }
+
+type MatchIDGenerator func() string
