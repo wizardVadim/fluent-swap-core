@@ -6,20 +6,19 @@ import (
 	"testing"
 
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
-	"github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/repository"
 )
 
-var _ repository.Repository = (*fakeRepository)(nil)
+var _ Repository = (*fakeRepository)(nil)
 
 type fakeRepository struct {
-	matchOrEnqueueFunc  func(context.Context, matchmaking.WaitingUser) (repository.MatchResult, error)
+	matchOrEnqueueFunc  func(context.Context, matchmaking.WaitingUser) (MatchResult, error)
 	removeFromQueueFunc func(context.Context, matchmaking.ClientID) error
 }
 
 func (f *fakeRepository) MatchOrEnqueue(
 	ctx context.Context,
 	user matchmaking.WaitingUser,
-) (repository.MatchResult, error) {
+) (MatchResult, error) {
 	return f.matchOrEnqueueFunc(ctx, user)
 }
 
@@ -30,14 +29,14 @@ func (f *fakeRepository) RemoveFromQueue(ctx context.Context, clientID matchmaki
 func TestService_FindPartner(t *testing.T) {
 	user := newWaitingUser(t, "client-1", matchmaking.LanguageCodeRU, matchmaking.LanguageCodeEN)
 	partner := newWaitingUser(t, "client-2", matchmaking.LanguageCodeEN, matchmaking.LanguageCodeRU)
-	expectedResult := repository.MatchResult{
+	expectedResult := MatchResult{
 		Partner: partner,
 		Matched: true,
 	}
 	expectedCtx := context.WithValue(context.Background(), contextKey("request-id"), "request-1")
 
 	repo := &fakeRepository{
-		matchOrEnqueueFunc: func(ctx context.Context, actualUser matchmaking.WaitingUser) (repository.MatchResult, error) {
+		matchOrEnqueueFunc: func(ctx context.Context, actualUser matchmaking.WaitingUser) (MatchResult, error) {
 			if ctx != expectedCtx {
 				t.Error("FindPartner() passed a different context")
 			}
@@ -67,8 +66,8 @@ func TestService_FindPartnerReturnsRepositoryError(t *testing.T) {
 	expectedErr := errors.New("repository failure")
 
 	repo := &fakeRepository{
-		matchOrEnqueueFunc: func(context.Context, matchmaking.WaitingUser) (repository.MatchResult, error) {
-			return repository.MatchResult{}, expectedErr
+		matchOrEnqueueFunc: func(context.Context, matchmaking.WaitingUser) (MatchResult, error) {
+			return MatchResult{}, expectedErr
 		},
 	}
 

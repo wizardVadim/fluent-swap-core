@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
+	matchmakingservice "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
 )
 
 func TestMemoryRepository_Enqueue(t *testing.T) {
@@ -221,7 +222,7 @@ func TestMemoryRepository_ConcurrentMatchDoesNotReusePartner(t *testing.T) {
 
 	type callResult struct {
 		requester matchmaking.ClientID
-		match     MatchResult
+		match     matchmakingservice.MatchResult
 		err       error
 	}
 

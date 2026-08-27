@@ -4,20 +4,19 @@ import (
 	"context"
 
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
-	"github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/repository"
 )
 
 type Service struct {
-	repository repository.Repository
+	repository Repository
 }
 
-func New(repo repository.Repository) *Service {
+func New(repo Repository) *Service {
 	return &Service{
 		repository: repo,
 	}
 }
 
-func (s *Service) FindPartner(ctx context.Context, user matchmaking.WaitingUser) (repository.MatchResult, error) {
+func (s *Service) FindPartner(ctx context.Context, user matchmaking.WaitingUser) (MatchResult, error) {
 	return s.repository.MatchOrEnqueue(ctx, user)
 }
 
