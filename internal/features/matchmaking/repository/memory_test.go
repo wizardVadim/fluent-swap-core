@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
+	"github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
 	matchmakingservice "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
 )
 
@@ -134,8 +135,8 @@ func TestMemoryRepository_DuplicateRequest(t *testing.T) {
 			t.Fatalf("first request: %v", err)
 		}
 		_, err := repository.MatchOrEnqueue(context.Background(), changed)
-		if !errors.Is(err, ErrClientAlreadyQueued) {
-			t.Fatalf("duplicate request error = %v, want %v", err, ErrClientAlreadyQueued)
+		if !errors.Is(err, service.ErrClientAlreadyQueued) {
+			t.Fatalf("duplicate request error = %v, want %v", err, service.ErrClientAlreadyQueued)
 		}
 		if got := len(repository.queue); got != 1 {
 			t.Fatalf("len(queue) = %d, want 1", got)

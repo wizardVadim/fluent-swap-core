@@ -40,7 +40,7 @@ func (repository *MemoryRepository) MatchOrEnqueue(ctx context.Context, wu match
 			if v.LanguagePair().IsEqual(wu.LanguagePair()) {
 				return matchmakingservice.MatchResult{Matched: false}, nil
 			}
-			return matchmakingservice.MatchResult{Matched: false}, ErrClientAlreadyQueued
+			return matchmakingservice.MatchResult{Matched: false}, matchmakingservice.ErrClientAlreadyQueued
 		}
 		if !matched && v.LanguagePair().IsCompatibleWith(wu.LanguagePair()) {
 			partner = v
