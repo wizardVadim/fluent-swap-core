@@ -1,5 +1,7 @@
 package websocket
 
+import "fmt"
+
 type Type string
 
 const (
@@ -21,6 +23,23 @@ type FindPartner struct {
 type FindPartnerPayload struct {
 	NativeLanguageCode   string `json:"native_language_code"`
 	LearningLanguageCode string `json:"learning_language_code"`
+}
+
+func (fp FindPartner) validate() error {
+	if err := fp.Payload.validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (fpp FindPartnerPayload) validate() error {
+	if fpp.NativeLanguageCode == "" {
+		return fmt.Errorf("native_language_code: %w", errValueIsEmpty)
+	}
+	if fpp.LearningLanguageCode == "" {
+		return fmt.Errorf("learning_language_code: %w", errValueIsEmpty)
+	}
+	return nil
 }
 
 // client -> server
@@ -72,3 +91,28 @@ const (
 	ErrorInvalidPayload      ErrorCode = "invalid_payload"
 	ErrorInternalServerError ErrorCode = "internal_server_error"
 )
+
+func NewError(msg string, code ErrorCode, requestID string) Error {
+	payload := ErrorPayload{
+		Code:    code,
+		Message: msg,
+	}
+	errorDTO := Error{
+		Type:      TypeError,
+		RequestID: &requestID,
+		Payload:   payload,
+	}
+	return errorDTO
+}
+
+func NewErrorWithoutRequestID(msg string, code ErrorCode) Error {
+	payload := ErrorPayload{
+		Code:    code,
+		Message: msg,
+	}
+	errorDTO := Error{
+		Type:    TypeError,
+		Payload: payload,
+	}
+	return errorDTO
+}
