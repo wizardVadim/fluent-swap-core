@@ -50,4 +50,3 @@ jobs:
 
       - name: Run tests with race detector
         run: go test -count=1 -race ./...
-        
