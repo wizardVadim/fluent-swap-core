@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
+	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/room"
 )
 
 type WebsocketHandler struct {
@@ -16,13 +17,13 @@ type WebsocketHandler struct {
 	service           Service
 	clientIDGenerator ClientIDGenerator
 	sessions          *sessionRegistry
-	matchIDGenerator  MatchIDGenerator
+	roomService       RoomService
 }
 
 func NewWebsocketHandler(
 	service Service,
 	clientIDGenerator ClientIDGenerator,
-	matchIDGenerator MatchIDGenerator,
+	roomService RoomService,
 ) *WebsocketHandler {
 	var upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -34,7 +35,7 @@ func NewWebsocketHandler(
 		clientIDGenerator: clientIDGenerator,
 		service:           service,
 		sessions:          newSessionRegistry(),
-		matchIDGenerator:  matchIDGenerator,
+		roomService:       roomService,
 	}
 }
 
@@ -61,9 +62,8 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		conn,
 	)
 
-	defer session.cancel()
-
 	if !h.sessions.register(session) {
+		session.cancel()
 		errorDTO := NewErrorWithoutRequestID(
 			"internal server error",
 			ErrorInternalServerError,
@@ -76,19 +76,7 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	defer func() {
-		h.sessions.remove(session)
-		searchRequestID := session.takeSearchRequestID()
-		if searchRequestID == "" {
-			return
-		}
-		currentCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := h.service.CancelSearch(currentCtx, session.clientID); err != nil {
-			// log cleanup error when structured logging is added
-			return
-		}
-	}()
+	defer h.cleanUp(session)
 
 	go session.writeLoop()
 
@@ -146,6 +134,22 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+}
+
+func (h *WebsocketHandler) cleanUp(session *clientSession) {
+	session.cancel()
+	h.sessions.remove(session)
+	session.clearSearchRequestID()
+	currentCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = h.service.CancelSearch(currentCtx, session.clientID)
+	// TODO: log cleanup error when structured logging is added
+	activeRoom, ok, _ := h.roomService.FindRoomByClientID(currentCtx, session.clientID)
+	// TODO: log cleanup error when structured logging is added
+	if ok {
+		_ = h.closeRoomWithTimeout(activeRoom.RoomID())
+		// TODO: log cleanup error when structured logging is added
+	}
 }
 
 func (h *WebsocketHandler) handleCancelSearch(
@@ -265,13 +269,25 @@ func (h *WebsocketHandler) handleFindPartner(
 			return nil
 		}
 
-		matchID := h.matchIDGenerator()
+		createdRoom, err := h.roomService.CreateRoom(session.ctx, session.clientID, partnerSession.clientID)
+		if err != nil {
+			errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
+			var savedErr error
+			if err := session.send(errorDTO); err != nil {
+				savedErr = err
+			}
+			errorDTO = NewError("internal server error", ErrorInternalServerError, partnerRequestID)
+			if err := partnerSession.send(errorDTO); err != nil {
+				savedErr = err
+			}
+			return savedErr
+		}
 
 		currentMatchFound := MatchFound{
 			Type:      TypeMatchFound,
 			RequestID: currentRequestID,
 			Payload: MatchFoundPayload{
-				MatchID: matchID,
+				MatchID: createdRoom.RoomID().Value(),
 			},
 		}
 
@@ -279,20 +295,22 @@ func (h *WebsocketHandler) handleFindPartner(
 			Type:      TypeMatchFound,
 			RequestID: partnerRequestID,
 			Payload: MatchFoundPayload{
-				MatchID: matchID,
+				MatchID: createdRoom.RoomID().Value(),
 			},
 		}
 
 		if err := partnerSession.send(partnerMatchFound); err != nil {
+			closeErr := h.closeRoomWithTimeout(createdRoom.RoomID())
 			errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
-			if err := session.send(errorDTO); err != nil {
-				return err
+			if err := session.send(errorDTO); err != nil || closeErr != nil {
+				return errors.Join(err, closeErr)
 			}
 			return nil
 		}
 
 		if err := session.send(currentMatchFound); err != nil {
-			return err
+			closeErr := h.closeRoomWithTimeout(createdRoom.RoomID())
+			return errors.Join(err, closeErr)
 		}
 
 		return nil
@@ -306,6 +324,18 @@ func (h *WebsocketHandler) handleFindPartner(
 		return err
 	}
 	return nil
+}
+
+func (h *WebsocketHandler) closeRoomWithTimeout(
+	roomID room.RoomID,
+) error {
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+
+	return h.roomService.CloseRoom(ctx, roomID)
 }
 
 type incomingEnvelope struct {

@@ -63,6 +63,10 @@ func (session *clientSession) clearSearchRequestID() {
 }
 
 func (session *clientSession) send(message any) error {
+	if err := session.ctx.Err(); err != nil {
+		return err
+	}
+
 	select {
 	case <-session.ctx.Done():
 		return session.ctx.Err()
