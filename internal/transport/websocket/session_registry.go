@@ -6,18 +6,18 @@ import (
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
 )
 
-type sessionRegistry struct {
+type SessionRegistry struct {
 	clientSessions map[matchmaking.ClientID]*clientSession
 	mtx            sync.RWMutex
 }
 
-func newSessionRegistry() *sessionRegistry {
-	return &sessionRegistry{
+func NewSessionRegistry() *SessionRegistry {
+	return &SessionRegistry{
 		clientSessions: make(map[matchmaking.ClientID]*clientSession),
 	}
 }
 
-func (registry *sessionRegistry) register(session *clientSession) bool {
+func (registry *SessionRegistry) register(session *clientSession) bool {
 	registry.mtx.Lock()
 	defer registry.mtx.Unlock()
 
@@ -29,7 +29,7 @@ func (registry *sessionRegistry) register(session *clientSession) bool {
 	return true
 }
 
-func (registry *sessionRegistry) get(clientID matchmaking.ClientID) (*clientSession, bool) {
+func (registry *SessionRegistry) get(clientID matchmaking.ClientID) (*clientSession, bool) {
 	registry.mtx.RLock()
 	defer registry.mtx.RUnlock()
 
@@ -40,7 +40,7 @@ func (registry *sessionRegistry) get(clientID matchmaking.ClientID) (*clientSess
 	return session, true
 }
 
-func (registry *sessionRegistry) remove(session *clientSession) {
+func (registry *SessionRegistry) remove(session *clientSession) {
 	registry.mtx.Lock()
 	defer registry.mtx.Unlock()
 

@@ -16,7 +16,7 @@ type WebsocketHandler struct {
 	upgrader          websocket.Upgrader
 	service           MatchmakingService
 	clientIDGenerator ClientIDGenerator
-	sessions          *sessionRegistry
+	sessions          *SessionRegistry
 	roomService       RoomService
 }
 
@@ -24,6 +24,7 @@ func NewWebsocketHandler(
 	service MatchmakingService,
 	clientIDGenerator ClientIDGenerator,
 	roomService RoomService,
+	sessions *SessionRegistry,
 ) *WebsocketHandler {
 	var upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -34,7 +35,7 @@ func NewWebsocketHandler(
 		upgrader:          upgrader,
 		clientIDGenerator: clientIDGenerator,
 		service:           service,
-		sessions:          newSessionRegistry(),
+		sessions:          sessions,
 		roomService:       roomService,
 	}
 }

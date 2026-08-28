@@ -93,6 +93,7 @@ func TestWebsocketHandlerFindPartnerReturnsSearchWaiting(t *testing.T) {
 		service,
 		fixedClientIDGenerator(clientID),
 		roomService,
+		NewSessionRegistry(),
 	))
 
 	request := FindPartner{
@@ -156,6 +157,7 @@ func TestWebsocketHandlerCancelSearchReturnsSearchCancelled(t *testing.T) {
 		service,
 		fixedClientIDGenerator(clientID),
 		roomService,
+		NewSessionRegistry(),
 	))
 
 	request := CancelSearch{Type: TypeCancelSearch, RequestID: "req-cancel-1"}
@@ -202,6 +204,7 @@ func TestWebsocketHandlerInvalidJSONKeepsConnectionOpen(t *testing.T) {
 		service,
 		fixedClientIDGenerator(clientID),
 		roomService,
+		NewSessionRegistry(),
 	))
 
 	if err := conn.WriteMessage(gorilla.TextMessage, []byte(`{"type":`)); err != nil {
@@ -263,6 +266,7 @@ func TestWebsocketHandlerDisconnectCancelsActiveSearch(t *testing.T) {
 		service,
 		fixedClientIDGenerator(clientID),
 		roomService,
+		NewSessionRegistry(),
 	))
 
 	request := FindPartner{
@@ -327,6 +331,7 @@ func TestWebsocketHandlerMatchFoundNotifiesBothClients(t *testing.T) {
 		service,
 		sequenceClientIDGenerator(firstClientID, secondClientID),
 		roomService,
+		NewSessionRegistry(),
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -404,6 +409,7 @@ func TestWebsocketHandlerDisconnectClosesActiveRoom(t *testing.T) {
 		matchmakingservice.New(repository.NewMemoryRepository()),
 		sequenceClientIDGenerator(firstClientID, secondClientID),
 		rooms,
+		NewSessionRegistry(),
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -485,6 +491,7 @@ func TestWebsocketHandlerCreateRoomFailureNotifiesBothClients(t *testing.T) {
 		matchmakingservice.New(repository.NewMemoryRepository()),
 		sequenceClientIDGenerator(firstClientID, secondClientID),
 		roomService,
+		NewSessionRegistry(),
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -547,7 +554,7 @@ func TestWebsocketHandlerMatchDeliveryFailureClosesCreatedRoom(t *testing.T) {
 			return nil
 		},
 	}
-	handler := NewWebsocketHandler(matchmakingService, nil, roomService)
+	handler := NewWebsocketHandler(matchmakingService, nil, roomService, NewSessionRegistry())
 
 	currentSession := newClientSession(context.Background(), currentClientID, nil)
 	t.Cleanup(currentSession.cancel)

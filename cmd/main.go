@@ -18,7 +18,8 @@ func main() {
 
 	roomRepository := roomrepository.NewMemoryRepository()
 	roomService := roomservice.New(roomRepository, roomservice.GenerateRoomID)
-	handler := websocket.NewWebsocketHandler(matchmakingService, websocket.GenerateClientID, roomService)
+	sessions := websocket.NewSessionRegistry()
+	handler := websocket.NewWebsocketHandler(matchmakingService, websocket.GenerateClientID, roomService, sessions)
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws/matchmaking", handler)
