@@ -48,3 +48,19 @@ func (s *Service) CreateRoom(
 	}
 	return inputRoom, nil
 }
+
+func (s *Service) FindRoomByClientID(ctx context.Context, clientID matchmaking.ClientID) (room.Room, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return room.Room{}, false, err
+	}
+
+	return s.repository.FindByClientID(ctx, clientID)
+}
+
+func (s *Service) CloseRoom(ctx context.Context, roomID room.RoomID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return s.repository.Delete(ctx, roomID)
+}
