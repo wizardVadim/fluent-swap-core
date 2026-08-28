@@ -41,10 +41,13 @@ jobs:
           fi
 
       - name: Check whitespace
-        run: git diff --check
+        run: |
+          empty_tree="$(git hash-object -t tree /dev/null)"
+          git diff --check "$empty_tree" HEAD
 
       - name: Run go vet
         run: go vet ./...
 
       - name: Run tests with race detector
         run: go test -count=1 -race ./...
+        
