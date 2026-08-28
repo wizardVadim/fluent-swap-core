@@ -10,13 +10,22 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
+	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/room"
 	"github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/repository"
 	matchmakingservice "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
+	roomrepository "github.com/wizardVadim/fluent-swap-core/internal/features/room/repository"
+	roomservice "github.com/wizardVadim/fluent-swap-core/internal/features/room/service"
 )
 
 type fakeService struct {
 	findPartner  func(context.Context, matchmaking.WaitingUser) (matchmakingservice.MatchResult, error)
 	cancelSearch func(context.Context, matchmaking.ClientID) error
+}
+
+type fakeRoomService struct {
+	createRoom         func(context.Context, matchmaking.ClientID, matchmaking.ClientID) (room.Room, error)
+	closeRoom          func(context.Context, room.RoomID) error
+	findRoomByClientID func(context.Context, matchmaking.ClientID) (room.Room, bool, error)
 }
 
 type cancelSearchCall struct {
@@ -41,6 +50,27 @@ func (f *fakeService) CancelSearch(ctx context.Context, clientID matchmaking.Cli
 	return f.cancelSearch(ctx, clientID)
 }
 
+func (f *fakeRoomService) CreateRoom(ctx context.Context, firstClientID matchmaking.ClientID, secondClientID matchmaking.ClientID) (room.Room, error) {
+	if f.createRoom == nil {
+		panic("unexpected RoomService.CreateRoom call")
+	}
+	return f.createRoom(ctx, firstClientID, secondClientID)
+}
+
+func (f *fakeRoomService) CloseRoom(ctx context.Context, room room.RoomID) error {
+	if f.closeRoom == nil {
+		panic("unexpected RoomService.CloseRoom call")
+	}
+	return f.closeRoom(ctx, room)
+}
+
+func (f *fakeRoomService) FindRoomByClientID(ctx context.Context, clientID matchmaking.ClientID) (room.Room, bool, error) {
+	if f.findRoomByClientID == nil {
+		return room.Room{}, false, nil
+	}
+	return f.findRoomByClientID(ctx, clientID)
+}
+
 func TestWebsocketHandlerFindPartnerReturnsSearchWaiting(t *testing.T) {
 	clientID := newTestClientID(t, "client-test-1")
 	findCalls := make(chan matchmaking.WaitingUser, 1)
@@ -55,10 +85,14 @@ func TestWebsocketHandlerFindPartnerReturnsSearchWaiting(t *testing.T) {
 		},
 	}
 
+	roomService := &fakeRoomService{
+		createRoom: nil,
+	}
+
 	conn := openTestConnection(t, NewWebsocketHandler(
 		service,
 		fixedClientIDGenerator(clientID),
-		fixedMatchIDGenerator("unused-match-id"),
+		roomService,
 	))
 
 	request := FindPartner{
@@ -114,10 +148,14 @@ func TestWebsocketHandlerCancelSearchReturnsSearchCancelled(t *testing.T) {
 		},
 	}
 
+	roomService := &fakeRoomService{
+		createRoom: nil,
+	}
+
 	conn := openTestConnection(t, NewWebsocketHandler(
 		service,
 		fixedClientIDGenerator(clientID),
-		fixedMatchIDGenerator("unused-match-id"),
+		roomService,
 	))
 
 	request := CancelSearch{Type: TypeCancelSearch, RequestID: "req-cancel-1"}
@@ -156,10 +194,14 @@ func TestWebsocketHandlerInvalidJSONKeepsConnectionOpen(t *testing.T) {
 		},
 	}
 
+	roomService := &fakeRoomService{
+		createRoom: nil,
+	}
+
 	conn := openTestConnection(t, NewWebsocketHandler(
 		service,
 		fixedClientIDGenerator(clientID),
-		fixedMatchIDGenerator("unused-match-id"),
+		roomService,
 	))
 
 	if err := conn.WriteMessage(gorilla.TextMessage, []byte(`{"type":`)); err != nil {
@@ -213,10 +255,14 @@ func TestWebsocketHandlerDisconnectCancelsActiveSearch(t *testing.T) {
 		},
 	}
 
+	roomService := &fakeRoomService{
+		createRoom: nil,
+	}
+
 	conn := openTestConnection(t, NewWebsocketHandler(
 		service,
 		fixedClientIDGenerator(clientID),
-		fixedMatchIDGenerator("unused-match-id"),
+		roomService,
 	))
 
 	request := FindPartner{
@@ -257,11 +303,30 @@ func TestWebsocketHandlerMatchFoundNotifiesBothClients(t *testing.T) {
 	secondClientID := newTestClientID(t, "client-match-2")
 	const matchID = "match-test-1"
 
+	roomService := &fakeRoomService{
+		createRoom: func(
+			ctx context.Context,
+			gotFirstClientID matchmaking.ClientID,
+			gotSecondClientID matchmaking.ClientID,
+		) (room.Room, error) {
+			if err := ctx.Err(); err != nil {
+				t.Errorf("CreateRoom() received cancelled context: %v", err)
+			}
+			if !gotFirstClientID.IsEqual(secondClientID) {
+				t.Errorf("first client ID = %q, want %q", gotFirstClientID.Value(), secondClientID.Value())
+			}
+			if !gotSecondClientID.IsEqual(firstClientID) {
+				t.Errorf("second client ID = %q, want %q", gotSecondClientID.Value(), firstClientID.Value())
+			}
+			return newTestRoom(t, matchID, gotFirstClientID, gotSecondClientID), nil
+		},
+	}
+
 	service := matchmakingservice.New(repository.NewMemoryRepository())
 	handler := NewWebsocketHandler(
 		service,
 		sequenceClientIDGenerator(firstClientID, secondClientID),
-		fixedMatchIDGenerator(matchID),
+		roomService,
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -324,6 +389,213 @@ func TestWebsocketHandlerMatchFoundNotifiesBothClients(t *testing.T) {
 	}
 }
 
+func TestWebsocketHandlerDisconnectClosesActiveRoom(t *testing.T) {
+	firstClientID := newTestClientID(t, "client-room-disconnect-1")
+	secondClientID := newTestClientID(t, "client-room-disconnect-2")
+	wantRoomID, err := room.NewRoomID("room-disconnect-1")
+	if err != nil {
+		t.Fatalf("NewRoomID(): %v", err)
+	}
+
+	rooms := roomservice.New(roomrepository.NewMemoryRepository(), func() (room.RoomID, error) {
+		return wantRoomID, nil
+	})
+	handler := NewWebsocketHandler(
+		matchmakingservice.New(repository.NewMemoryRepository()),
+		sequenceClientIDGenerator(firstClientID, secondClientID),
+		rooms,
+	)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	firstConn := dialTestConnection(t, server.URL)
+	secondConn := dialTestConnection(t, server.URL)
+	firstRequest := FindPartner{
+		Type:      TypeFindPartner,
+		RequestID: "req-room-disconnect-1",
+		Payload: FindPartnerPayload{
+			NativeLanguageCode:   "ru",
+			LearningLanguageCode: "en",
+		},
+	}
+	secondRequest := FindPartner{
+		Type:      TypeFindPartner,
+		RequestID: "req-room-disconnect-2",
+		Payload: FindPartnerPayload{
+			NativeLanguageCode:   "en",
+			LearningLanguageCode: "ru",
+		},
+	}
+
+	if err := firstConn.WriteJSON(firstRequest); err != nil {
+		t.Fatalf("write first find_partner: %v", err)
+	}
+	var waiting SearchWaiting
+	if err := firstConn.ReadJSON(&waiting); err != nil {
+		t.Fatalf("read first search_waiting: %v", err)
+	}
+	if err := secondConn.WriteJSON(secondRequest); err != nil {
+		t.Fatalf("write second find_partner: %v", err)
+	}
+	var firstMatch MatchFound
+	if err := firstConn.ReadJSON(&firstMatch); err != nil {
+		t.Fatalf("read first match_found: %v", err)
+	}
+	var secondMatch MatchFound
+	if err := secondConn.ReadJSON(&secondMatch); err != nil {
+		t.Fatalf("read second match_found: %v", err)
+	}
+
+	if err := firstConn.Close(); err != nil {
+		t.Fatalf("close first connection: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, found, err := rooms.FindRoomByClientID(context.Background(), secondClientID)
+		if err != nil {
+			t.Fatalf("FindRoomByClientID(): %v", err)
+		}
+		if !found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("room was not closed after client disconnect")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWebsocketHandlerCreateRoomFailureNotifiesBothClients(t *testing.T) {
+	firstClientID := newTestClientID(t, "client-room-error-1")
+	secondClientID := newTestClientID(t, "client-room-error-2")
+	wantErr := errors.New("create room")
+
+	roomService := &fakeRoomService{
+		createRoom: func(
+			context.Context,
+			matchmaking.ClientID,
+			matchmaking.ClientID,
+		) (room.Room, error) {
+			return room.Room{}, wantErr
+		},
+	}
+
+	handler := NewWebsocketHandler(
+		matchmakingservice.New(repository.NewMemoryRepository()),
+		sequenceClientIDGenerator(firstClientID, secondClientID),
+		roomService,
+	)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	firstConn := dialTestConnection(t, server.URL)
+	secondConn := dialTestConnection(t, server.URL)
+	firstRequest := FindPartner{
+		Type:      TypeFindPartner,
+		RequestID: "req-room-error-1",
+		Payload: FindPartnerPayload{
+			NativeLanguageCode:   "ru",
+			LearningLanguageCode: "en",
+		},
+	}
+	secondRequest := FindPartner{
+		Type:      TypeFindPartner,
+		RequestID: "req-room-error-2",
+		Payload: FindPartnerPayload{
+			NativeLanguageCode:   "en",
+			LearningLanguageCode: "ru",
+		},
+	}
+
+	if err := firstConn.WriteJSON(firstRequest); err != nil {
+		t.Fatalf("write first find_partner: %v", err)
+	}
+	var waiting SearchWaiting
+	if err := firstConn.ReadJSON(&waiting); err != nil {
+		t.Fatalf("read first search_waiting: %v", err)
+	}
+	if err := secondConn.WriteJSON(secondRequest); err != nil {
+		t.Fatalf("write second find_partner: %v", err)
+	}
+
+	assertInternalServerError(t, secondConn, secondRequest.RequestID)
+	assertInternalServerError(t, firstConn, firstRequest.RequestID)
+}
+
+func TestWebsocketHandlerMatchDeliveryFailureClosesCreatedRoom(t *testing.T) {
+	currentClientID := newTestClientID(t, "client-delivery-current")
+	partnerClientID := newTestClientID(t, "client-delivery-partner")
+	createdRoom := newTestRoom(t, "room-delivery-1", currentClientID, partnerClientID)
+	closeCalls := make(chan room.RoomID, 1)
+
+	partner := newTestWaitingUser(t, partnerClientID, matchmaking.LanguageCodeEN, matchmaking.LanguageCodeRU)
+	matchmakingService := &fakeService{
+		findPartner: func(context.Context, matchmaking.WaitingUser) (matchmakingservice.MatchResult, error) {
+			return matchmakingservice.MatchResult{Matched: true, Partner: partner}, nil
+		},
+	}
+	roomService := &fakeRoomService{
+		createRoom: func(context.Context, matchmaking.ClientID, matchmaking.ClientID) (room.Room, error) {
+			return createdRoom, nil
+		},
+		closeRoom: func(ctx context.Context, roomID room.RoomID) error {
+			if err := ctx.Err(); err != nil {
+				t.Errorf("CloseRoom() received cancelled context: %v", err)
+			}
+			closeCalls <- roomID
+			return nil
+		},
+	}
+	handler := NewWebsocketHandler(matchmakingService, nil, roomService)
+
+	currentSession := newClientSession(context.Background(), currentClientID, nil)
+	t.Cleanup(currentSession.cancel)
+	partnerSession := newClientSession(context.Background(), partnerClientID, nil)
+	partnerSession.setSearchRequestID("req-delivery-partner")
+	if !handler.sessions.register(partnerSession) {
+		t.Fatal("register partner session")
+	}
+	for i := 0; i < cap(partnerSession.outbound); i++ {
+		partnerSession.outbound <- struct{}{}
+	}
+	partnerSession.cancel()
+
+	envelope := incomingEnvelope{
+		Type:      TypeFindPartner,
+		RequestID: "req-delivery-current",
+		Payload: []byte(`{
+			"native_language_code":"ru",
+			"learning_language_code":"en"
+		}`),
+	}
+	if err := handler.handleFindPartner(currentSession, envelope); err != nil {
+		t.Fatalf("handleFindPartner() returned unexpected error: %v", err)
+	}
+
+	select {
+	case gotRoomID := <-closeCalls:
+		if gotRoomID != createdRoom.RoomID() {
+			t.Errorf("CloseRoom() room ID = %v, want %v", gotRoomID, createdRoom.RoomID())
+		}
+	default:
+		t.Fatal("CloseRoom() was not called after match delivery failure")
+	}
+
+	select {
+	case message := <-currentSession.outbound:
+		errorResponse, ok := message.(Error)
+		if !ok {
+			t.Fatalf("current client message type = %T, want Error", message)
+		}
+		if errorResponse.RequestID == nil || *errorResponse.RequestID != envelope.RequestID {
+			t.Errorf("error request_id = %v, want %q", errorResponse.RequestID, envelope.RequestID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current client did not receive delivery failure notification")
+	}
+}
+
 func openTestConnection(t *testing.T, handler *WebsocketHandler) *gorilla.Conn {
 	t.Helper()
 
@@ -376,12 +648,6 @@ func sequenceClientIDGenerator(clientIDs ...matchmaking.ClientID) ClientIDGenera
 	}
 }
 
-func fixedMatchIDGenerator(matchID string) MatchIDGenerator {
-	return func() string {
-		return matchID
-	}
-}
-
 func newTestClientID(t *testing.T, value string) matchmaking.ClientID {
 	t.Helper()
 
@@ -390,4 +656,72 @@ func newTestClientID(t *testing.T, value string) matchmaking.ClientID {
 		t.Fatalf("NewClientID(%q): %v", value, err)
 	}
 	return clientID
+}
+
+func newTestRoom(
+	t *testing.T,
+	roomIDValue string,
+	firstClientID matchmaking.ClientID,
+	secondClientID matchmaking.ClientID,
+) room.Room {
+	t.Helper()
+
+	clients, err := room.NewConnectedClientsPair(firstClientID, secondClientID)
+	if err != nil {
+		t.Fatalf("NewConnectedClientsPair(): %v", err)
+	}
+	roomID, err := room.NewRoomID(roomIDValue)
+	if err != nil {
+		t.Fatalf("NewRoomID(%q): %v", roomIDValue, err)
+	}
+	target, err := room.NewRoom(clients, roomID)
+	if err != nil {
+		t.Fatalf("NewRoom(): %v", err)
+	}
+	return target
+}
+
+func newTestWaitingUser(
+	t *testing.T,
+	clientID matchmaking.ClientID,
+	nativeCode matchmaking.LanguageCode,
+	learningCode matchmaking.LanguageCode,
+) matchmaking.WaitingUser {
+	t.Helper()
+
+	native, err := matchmaking.NewLanguage(nativeCode)
+	if err != nil {
+		t.Fatalf("NewLanguage(%q): %v", nativeCode, err)
+	}
+	learning, err := matchmaking.NewLanguage(learningCode)
+	if err != nil {
+		t.Fatalf("NewLanguage(%q): %v", learningCode, err)
+	}
+	pair, err := matchmaking.NewLanguagePair(native, learning)
+	if err != nil {
+		t.Fatalf("NewLanguagePair(): %v", err)
+	}
+	user, err := matchmaking.NewWaitingUser(clientID, pair)
+	if err != nil {
+		t.Fatalf("NewWaitingUser(): %v", err)
+	}
+	return user
+}
+
+func assertInternalServerError(t *testing.T, conn *gorilla.Conn, requestID string) {
+	t.Helper()
+
+	var response Error
+	if err := conn.ReadJSON(&response); err != nil {
+		t.Fatalf("read internal_server_error: %v", err)
+	}
+	if response.Type != TypeError {
+		t.Errorf("response type = %q, want %q", response.Type, TypeError)
+	}
+	if response.RequestID == nil || *response.RequestID != requestID {
+		t.Errorf("response request_id = %v, want %q", response.RequestID, requestID)
+	}
+	if response.Payload.Code != ErrorInternalServerError {
+		t.Errorf("error code = %q, want %q", response.Payload.Code, ErrorInternalServerError)
+	}
 }

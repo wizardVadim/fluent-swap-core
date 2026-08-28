@@ -33,6 +33,10 @@ func (id ClientID) IsEqual(other ClientID) bool {
 	return id.value == other.value
 }
 
+func (id ClientID) IsValid() bool {
+	return id.validate() == nil
+}
+
 type WaitingUser struct {
 	clientID     ClientID
 	languagePair LanguagePair

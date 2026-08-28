@@ -5,15 +5,20 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/repository"
+	matchmakingrepository "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/repository"
 	matchmakingservice "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
 	"github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/transport/websocket"
+	roomrepository "github.com/wizardVadim/fluent-swap-core/internal/features/room/repository"
+	roomservice "github.com/wizardVadim/fluent-swap-core/internal/features/room/service"
 )
 
 func main() {
-	matchmakingRepository := repository.NewMemoryRepository()
+	matchmakingRepository := matchmakingrepository.NewMemoryRepository()
 	matchmakingService := matchmakingservice.New(matchmakingRepository)
-	handler := websocket.NewWebsocketHandler(matchmakingService, websocket.GenerateClientID, websocket.GenerateMatchID)
+
+	roomRepository := roomrepository.NewMemoryRepository()
+	roomService := roomservice.New(roomRepository, roomservice.GenerateRoomID)
+	handler := websocket.NewWebsocketHandler(matchmakingService, websocket.GenerateClientID, roomService)
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws/matchmaking", handler)
