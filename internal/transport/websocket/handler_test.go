@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"strings"
@@ -9,8 +10,10 @@ import (
 	"time"
 
 	gorilla "github.com/gorilla/websocket"
+	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/chat"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/room"
+	chatservice "github.com/wizardVadim/fluent-swap-core/internal/features/chat/service"
 	"github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/repository"
 	matchmakingservice "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
 	roomrepository "github.com/wizardVadim/fluent-swap-core/internal/features/room/repository"
@@ -26,6 +29,10 @@ type fakeRoomService struct {
 	createRoom         func(context.Context, matchmaking.ClientID, matchmaking.ClientID) (room.Room, error)
 	closeRoom          func(context.Context, room.RoomID) error
 	findRoomByClientID func(context.Context, matchmaking.ClientID) (room.Room, bool, error)
+}
+
+type fakeChatService struct {
+	sendMessage func(context.Context, matchmaking.ClientID, room.RoomID, chat.MessageText) error
 }
 
 type cancelSearchCall struct {
@@ -71,6 +78,206 @@ func (f *fakeRoomService) FindRoomByClientID(ctx context.Context, clientID match
 	return f.findRoomByClientID(ctx, clientID)
 }
 
+func (f *fakeChatService) SendMessage(ctx context.Context, senderID matchmaking.ClientID, roomID room.RoomID, text chat.MessageText) error {
+	if f.sendMessage == nil {
+		return nil
+	}
+	return f.sendMessage(ctx, senderID, roomID, text)
+}
+
+func TestWebsocketHandlerSendMessageCallsChatService(t *testing.T) {
+	clientID := newTestClientID(t, "chat-sender")
+	session := newClientSession(context.Background(), clientID, nil)
+	t.Cleanup(session.cancel)
+	request := newTestSendMessageEnvelope(t, "req-chat-1", "room-1", "  hello  ")
+
+	handler := &WebsocketHandler{
+		chatService: &fakeChatService{
+			sendMessage: func(
+				ctx context.Context,
+				senderID matchmaking.ClientID,
+				roomID room.RoomID,
+				text chat.MessageText,
+			) error {
+				if ctx != session.ctx {
+					t.Error("SendMessage() received a different context")
+				}
+				if !senderID.IsEqual(clientID) {
+					t.Errorf("SendMessage() sender ID = %v, want %v", senderID, clientID)
+				}
+				if roomID.Value() != "room-1" {
+					t.Errorf("SendMessage() room ID = %q, want %q", roomID.Value(), "room-1")
+				}
+				if text.Value() != "  hello  " {
+					t.Errorf("SendMessage() text = %q, want %q", text.Value(), "  hello  ")
+				}
+				return nil
+			},
+		},
+	}
+
+	if err := handler.handleSendMessage(session, request); err != nil {
+		t.Fatalf("handleSendMessage() returned unexpected error: %v", err)
+	}
+	select {
+	case message := <-session.outbound:
+		t.Fatalf("successful send_message produced unexpected response: %T", message)
+	default:
+	}
+}
+
+func TestWebsocketHandlerSendMessageRejectsInvalidDomainPayload(t *testing.T) {
+	tests := []struct {
+		name      string
+		matchID   string
+		text      string
+		wantCode  ErrorCode
+		requestID string
+	}{
+		{
+			name:      "invalid text",
+			matchID:   "room-1",
+			text:      "   ",
+			wantCode:  ErrorInvalidPayload,
+			requestID: "req-invalid-text",
+		},
+		{
+			name:      "invalid match ID",
+			matchID:   "   ",
+			text:      "hello",
+			wantCode:  ErrorInvalidMatchID,
+			requestID: "req-invalid-match",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientID := newTestClientID(t, "chat-sender")
+			session := newClientSession(context.Background(), clientID, nil)
+			t.Cleanup(session.cancel)
+			handler := &WebsocketHandler{
+				chatService: &fakeChatService{sendMessage: func(context.Context, matchmaking.ClientID, room.RoomID, chat.MessageText) error {
+					t.Fatal("SendMessage() called for invalid domain payload")
+					return nil
+				}},
+			}
+
+			err := handler.handleSendMessage(
+				session,
+				newTestSendMessageEnvelope(t, tt.requestID, tt.matchID, tt.text),
+			)
+			if err != nil {
+				t.Fatalf("handleSendMessage() returned unexpected error: %v", err)
+			}
+			assertOutboundError(t, session, tt.requestID, tt.wantCode)
+		})
+	}
+}
+
+func TestWebsocketHandlerSendMessageMapsServiceErrors(t *testing.T) {
+	unknownErr := errors.New("chat service failed")
+	tests := []struct {
+		name     string
+		inputErr error
+		wantCode ErrorCode
+	}{
+		{
+			name:     "sender is not in room",
+			inputErr: chatservice.ErrSenderNotInRoom,
+			wantCode: ErrorInvalidMatchID,
+		},
+		{
+			name:     "room mismatch",
+			inputErr: chatservice.ErrRoomMismatch,
+			wantCode: ErrorInvalidMatchID,
+		},
+		{
+			name:     "recipient unavailable",
+			inputErr: chatservice.ErrRecipientUnavailable,
+			wantCode: ErrorInternalServerError,
+		},
+		{
+			name:     "unknown service error",
+			inputErr: unknownErr,
+			wantCode: ErrorInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientID := newTestClientID(t, "chat-sender")
+			session := newClientSession(context.Background(), clientID, nil)
+			t.Cleanup(session.cancel)
+			handler := &WebsocketHandler{
+				chatService: &fakeChatService{sendMessage: func(context.Context, matchmaking.ClientID, room.RoomID, chat.MessageText) error {
+					return tt.inputErr
+				}},
+			}
+
+			requestID := "req-service-error"
+			if err := handler.handleSendMessage(
+				session,
+				newTestSendMessageEnvelope(t, requestID, "room-1", "hello"),
+			); err != nil {
+				t.Fatalf("handleSendMessage() returned unexpected error: %v", err)
+			}
+			assertOutboundError(t, session, requestID, tt.wantCode)
+		})
+	}
+}
+
+func TestWebsocketHandlerContinuesAfterInvalidSendMessage(t *testing.T) {
+	clientID := newTestClientID(t, "chat-sender")
+	chatCalls := make(chan struct{}, 1)
+	handler := NewWebsocketHandler(
+		&fakeMatchmakingService{},
+		fixedClientIDGenerator(clientID),
+		&fakeRoomService{},
+		NewSessionRegistry(),
+		&fakeChatService{sendMessage: func(context.Context, matchmaking.ClientID, room.RoomID, chat.MessageText) error {
+			chatCalls <- struct{}{}
+			return nil
+		}},
+	)
+	conn := openTestConnection(t, handler)
+
+	invalidRequest := SendMessage{
+		Type:      TypeSendMessage,
+		RequestID: "req-invalid",
+		Payload: MessagePayload{
+			MatchID: "room-1",
+			Text:    "   ",
+		},
+	}
+	if err := conn.WriteJSON(invalidRequest); err != nil {
+		t.Fatalf("write invalid send_message: %v", err)
+	}
+	var errorResponse Error
+	if err := conn.ReadJSON(&errorResponse); err != nil {
+		t.Fatalf("read invalid_payload response: %v", err)
+	}
+	if errorResponse.Payload.Code != ErrorInvalidPayload {
+		t.Fatalf("error code = %q, want %q", errorResponse.Payload.Code, ErrorInvalidPayload)
+	}
+
+	validRequest := SendMessage{
+		Type:      TypeSendMessage,
+		RequestID: "req-valid",
+		Payload: MessagePayload{
+			MatchID: "room-1",
+			Text:    "hello",
+		},
+	}
+	if err := conn.WriteJSON(validRequest); err != nil {
+		t.Fatalf("write valid send_message: %v", err)
+	}
+	select {
+	case <-chatCalls:
+	case <-time.After(time.Second):
+		t.Fatal("SendMessage() was not called after client error")
+	}
+}
+
 func TestWebsocketHandlerFindPartnerReturnsSearchWaiting(t *testing.T) {
 	clientID := newTestClientID(t, "client-test-1")
 	findCalls := make(chan matchmaking.WaitingUser, 1)
@@ -94,6 +301,7 @@ func TestWebsocketHandlerFindPartnerReturnsSearchWaiting(t *testing.T) {
 		fixedClientIDGenerator(clientID),
 		roomService,
 		NewSessionRegistry(),
+		&fakeChatService{},
 	))
 
 	request := FindPartner{
@@ -158,6 +366,7 @@ func TestWebsocketHandlerCancelSearchReturnsSearchCancelled(t *testing.T) {
 		fixedClientIDGenerator(clientID),
 		roomService,
 		NewSessionRegistry(),
+		&fakeChatService{},
 	))
 
 	request := CancelSearch{Type: TypeCancelSearch, RequestID: "req-cancel-1"}
@@ -205,6 +414,7 @@ func TestWebsocketHandlerInvalidJSONKeepsConnectionOpen(t *testing.T) {
 		fixedClientIDGenerator(clientID),
 		roomService,
 		NewSessionRegistry(),
+		&fakeChatService{},
 	))
 
 	if err := conn.WriteMessage(gorilla.TextMessage, []byte(`{"type":`)); err != nil {
@@ -267,6 +477,7 @@ func TestWebsocketHandlerDisconnectCancelsActiveSearch(t *testing.T) {
 		fixedClientIDGenerator(clientID),
 		roomService,
 		NewSessionRegistry(),
+		&fakeChatService{},
 	))
 
 	request := FindPartner{
@@ -332,6 +543,7 @@ func TestWebsocketHandlerMatchFoundNotifiesBothClients(t *testing.T) {
 		sequenceClientIDGenerator(firstClientID, secondClientID),
 		roomService,
 		NewSessionRegistry(),
+		&fakeChatService{},
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -394,6 +606,112 @@ func TestWebsocketHandlerMatchFoundNotifiesBothClients(t *testing.T) {
 	}
 }
 
+func TestWebsocketHandlerMatchedClientsRelayMessagesBothWays(t *testing.T) {
+	firstClientID := newTestClientID(t, "client-chat-1")
+	secondClientID := newTestClientID(t, "client-chat-2")
+	sessions := NewSessionRegistry()
+	rooms := roomservice.New(roomrepository.NewMemoryRepository(), roomservice.GenerateRoomID)
+	chatDelivery := NewChatDelivery(sessions)
+	chatService := chatservice.New(chatDelivery, rooms)
+	handler := NewWebsocketHandler(
+		matchmakingservice.New(repository.NewMemoryRepository()),
+		sequenceClientIDGenerator(firstClientID, secondClientID),
+		rooms,
+		sessions,
+		chatService,
+	)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	firstConn := dialTestConnection(t, server.URL)
+	secondConn := dialTestConnection(t, server.URL)
+
+	firstFind := FindPartner{
+		Type:      TypeFindPartner,
+		RequestID: "req-chat-find-1",
+		Payload: FindPartnerPayload{
+			NativeLanguageCode:   "ru",
+			LearningLanguageCode: "en",
+		},
+	}
+	if err := firstConn.WriteJSON(firstFind); err != nil {
+		t.Fatalf("first client write find_partner: %v", err)
+	}
+	var waiting SearchWaiting
+	if err := firstConn.ReadJSON(&waiting); err != nil {
+		t.Fatalf("first client read search_waiting: %v", err)
+	}
+	if waiting.Type != TypeSearchWaiting || waiting.RequestID != firstFind.RequestID {
+		t.Fatalf("search_waiting = %+v, want type %q and request ID %q", waiting, TypeSearchWaiting, firstFind.RequestID)
+	}
+
+	secondFind := FindPartner{
+		Type:      TypeFindPartner,
+		RequestID: "req-chat-find-2",
+		Payload: FindPartnerPayload{
+			NativeLanguageCode:   "en",
+			LearningLanguageCode: "ru",
+		},
+	}
+	if err := secondConn.WriteJSON(secondFind); err != nil {
+		t.Fatalf("second client write find_partner: %v", err)
+	}
+
+	var firstMatch MatchFound
+	if err := firstConn.ReadJSON(&firstMatch); err != nil {
+		t.Fatalf("first client read match_found: %v", err)
+	}
+	var secondMatch MatchFound
+	if err := secondConn.ReadJSON(&secondMatch); err != nil {
+		t.Fatalf("second client read match_found: %v", err)
+	}
+	if firstMatch.Type != TypeMatchFound || secondMatch.Type != TypeMatchFound {
+		t.Fatalf("match types = (%q, %q), want %q", firstMatch.Type, secondMatch.Type, TypeMatchFound)
+	}
+	if firstMatch.RequestID != firstFind.RequestID || secondMatch.RequestID != secondFind.RequestID {
+		t.Errorf(
+			"match request IDs = (%q, %q), want (%q, %q)",
+			firstMatch.RequestID,
+			secondMatch.RequestID,
+			firstFind.RequestID,
+			secondFind.RequestID,
+		)
+	}
+	if firstMatch.Payload.MatchID == "" || firstMatch.Payload.MatchID != secondMatch.Payload.MatchID {
+		t.Fatalf(
+			"match IDs = (%q, %q), want same non-empty value",
+			firstMatch.Payload.MatchID,
+			secondMatch.Payload.MatchID,
+		)
+	}
+
+	matchID := firstMatch.Payload.MatchID
+	firstText := "Hello from first client"
+	if err := firstConn.WriteJSON(SendMessage{
+		Type:      TypeSendMessage,
+		RequestID: "req-chat-message-1",
+		Payload: MessagePayload{
+			MatchID: matchID,
+			Text:    firstText,
+		},
+	}); err != nil {
+		t.Fatalf("first client write send_message: %v", err)
+	}
+	assertReceivedChatMessage(t, secondConn, matchID, firstText)
+
+	secondText := "Hello from second client"
+	if err := secondConn.WriteJSON(SendMessage{
+		Type:      TypeSendMessage,
+		RequestID: "req-chat-message-2",
+		Payload: MessagePayload{
+			MatchID: matchID,
+			Text:    secondText,
+		},
+	}); err != nil {
+		t.Fatalf("second client write send_message: %v", err)
+	}
+	assertReceivedChatMessage(t, firstConn, matchID, secondText)
+}
+
 func TestWebsocketHandlerDisconnectClosesActiveRoom(t *testing.T) {
 	firstClientID := newTestClientID(t, "client-room-disconnect-1")
 	secondClientID := newTestClientID(t, "client-room-disconnect-2")
@@ -410,6 +728,7 @@ func TestWebsocketHandlerDisconnectClosesActiveRoom(t *testing.T) {
 		sequenceClientIDGenerator(firstClientID, secondClientID),
 		rooms,
 		NewSessionRegistry(),
+		&fakeChatService{},
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -492,6 +811,7 @@ func TestWebsocketHandlerCreateRoomFailureNotifiesBothClients(t *testing.T) {
 		sequenceClientIDGenerator(firstClientID, secondClientID),
 		roomService,
 		NewSessionRegistry(),
+		&fakeChatService{},
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -554,7 +874,12 @@ func TestWebsocketHandlerMatchDeliveryFailureClosesCreatedRoom(t *testing.T) {
 			return nil
 		},
 	}
-	handler := NewWebsocketHandler(matchmakingService, nil, roomService, NewSessionRegistry())
+	handler := NewWebsocketHandler(
+		matchmakingService,
+		nil, roomService,
+		NewSessionRegistry(),
+		&fakeChatService{},
+	)
 
 	currentSession := newClientSession(context.Background(), currentClientID, nil)
 	t.Cleanup(currentSession.cancel)
@@ -713,6 +1038,73 @@ func newTestWaitingUser(
 		t.Fatalf("NewWaitingUser(): %v", err)
 	}
 	return user
+}
+
+func newTestSendMessageEnvelope(
+	t *testing.T,
+	requestID string,
+	matchID string,
+	text string,
+) incomingEnvelope {
+	t.Helper()
+
+	payload, err := json.Marshal(MessagePayload{MatchID: matchID, Text: text})
+	if err != nil {
+		t.Fatalf("marshal send_message payload: %v", err)
+	}
+	return incomingEnvelope{
+		Type:      TypeSendMessage,
+		RequestID: requestID,
+		Payload:   payload,
+	}
+}
+
+func assertOutboundError(
+	t *testing.T,
+	session *clientSession,
+	requestID string,
+	wantCode ErrorCode,
+) {
+	t.Helper()
+
+	select {
+	case message := <-session.outbound:
+		errorResponse, ok := message.(Error)
+		if !ok {
+			t.Fatalf("outbound message type = %T, want Error", message)
+		}
+		if errorResponse.RequestID == nil || *errorResponse.RequestID != requestID {
+			t.Errorf("error request ID = %v, want %q", errorResponse.RequestID, requestID)
+		}
+		if errorResponse.Payload.Code != wantCode {
+			t.Errorf("error code = %q, want %q", errorResponse.Payload.Code, wantCode)
+		}
+	default:
+		t.Fatal("session outbound does not contain error response")
+	}
+}
+
+func assertReceivedChatMessage(
+	t *testing.T,
+	conn *gorilla.Conn,
+	wantMatchID string,
+	wantText string,
+) {
+	t.Helper()
+
+	var received ReceiveMessage
+	if err := conn.ReadJSON(&received); err != nil {
+		t.Fatalf("read receive_message: %v", err)
+	}
+	if received.Type != TypeReceiveMessage {
+		t.Errorf("receive_message type = %q, want %q", received.Type, TypeReceiveMessage)
+	}
+	if received.Payload.MatchID != wantMatchID {
+		t.Errorf("receive_message match ID = %q, want %q", received.Payload.MatchID, wantMatchID)
+	}
+	if received.Payload.Text != wantText {
+		t.Errorf("receive_message text = %q, want %q", received.Payload.Text, wantText)
+	}
 }
 
 func assertInternalServerError(t *testing.T, conn *gorilla.Conn, requestID string) {

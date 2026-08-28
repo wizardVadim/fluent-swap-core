@@ -94,6 +94,7 @@ const (
 	ErrorUnknownMessageType  ErrorCode = "unknown_message_type"
 	ErrorInvalidPayload      ErrorCode = "invalid_payload"
 	ErrorInternalServerError ErrorCode = "internal_server_error"
+	ErrorInvalidMatchID      ErrorCode = "invalid_match_id"
 )
 
 func NewError(msg string, code ErrorCode, requestID string) Error {
