@@ -7,9 +7,9 @@ import (
 
 	matchmakingrepository "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/repository"
 	matchmakingservice "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
-	"github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/transport/websocket"
 	roomrepository "github.com/wizardVadim/fluent-swap-core/internal/features/room/repository"
 	roomservice "github.com/wizardVadim/fluent-swap-core/internal/features/room/service"
+	"github.com/wizardVadim/fluent-swap-core/internal/transport/websocket"
 )
 
 func main() {
