@@ -1,6 +1,8 @@
 package websocket
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Type string
 
@@ -11,6 +13,8 @@ const (
 	TypeSearchCancelled Type = "search_cancelled"
 	TypeMatchFound      Type = "match_found"
 	TypeError           Type = "error"
+	TypeSendMessage     Type = "send_message"
+	TypeReceiveMessage  Type = "receive_message"
 )
 
 // client -> server
@@ -115,4 +119,24 @@ func NewErrorWithoutRequestID(msg string, code ErrorCode) Error {
 		Payload: payload,
 	}
 	return errorDTO
+}
+
+// client -> server
+
+type SendMessage struct {
+	Type      Type           `json:"type"`
+	RequestID string         `json:"request_id"`
+	Payload   MessagePayload `json:"payload"`
+}
+
+// server -> client
+
+type ReceiveMessage struct {
+	Type    Type           `json:"type"`
+	Payload MessagePayload `json:"payload"`
+}
+
+type MessagePayload struct {
+	Text    string `json:"text"`
+	MatchID string `json:"match_id"`
 }

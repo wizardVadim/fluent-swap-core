@@ -14,14 +14,14 @@ import (
 
 type WebsocketHandler struct {
 	upgrader          websocket.Upgrader
-	service           Service
+	service           MatchmakingService
 	clientIDGenerator ClientIDGenerator
 	sessions          *sessionRegistry
 	roomService       RoomService
 }
 
 func NewWebsocketHandler(
-	service Service,
+	service MatchmakingService,
 	clientIDGenerator ClientIDGenerator,
 	roomService RoomService,
 ) *WebsocketHandler {

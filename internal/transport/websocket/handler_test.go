@@ -17,7 +17,7 @@ import (
 	roomservice "github.com/wizardVadim/fluent-swap-core/internal/features/room/service"
 )
 
-type fakeService struct {
+type fakeMatchmakingService struct {
 	findPartner  func(context.Context, matchmaking.WaitingUser) (matchmakingservice.MatchResult, error)
 	cancelSearch func(context.Context, matchmaking.ClientID) error
 }
@@ -33,7 +33,7 @@ type cancelSearchCall struct {
 	ctxErr   error
 }
 
-func (f *fakeService) FindPartner(
+func (f *fakeMatchmakingService) FindPartner(
 	ctx context.Context,
 	user matchmaking.WaitingUser,
 ) (matchmakingservice.MatchResult, error) {
@@ -43,7 +43,7 @@ func (f *fakeService) FindPartner(
 	return f.findPartner(ctx, user)
 }
 
-func (f *fakeService) CancelSearch(ctx context.Context, clientID matchmaking.ClientID) error {
+func (f *fakeMatchmakingService) CancelSearch(ctx context.Context, clientID matchmaking.ClientID) error {
 	if f.cancelSearch == nil {
 		return nil
 	}
@@ -75,7 +75,7 @@ func TestWebsocketHandlerFindPartnerReturnsSearchWaiting(t *testing.T) {
 	clientID := newTestClientID(t, "client-test-1")
 	findCalls := make(chan matchmaking.WaitingUser, 1)
 
-	service := &fakeService{
+	service := &fakeMatchmakingService{
 		findPartner: func(ctx context.Context, user matchmaking.WaitingUser) (matchmakingservice.MatchResult, error) {
 			if err := ctx.Err(); err != nil {
 				t.Errorf("FindPartner() received cancelled context: %v", err)
@@ -138,7 +138,7 @@ func TestWebsocketHandlerCancelSearchReturnsSearchCancelled(t *testing.T) {
 	clientID := newTestClientID(t, "client-test-2")
 	cancelCalls := make(chan matchmaking.ClientID, 1)
 
-	service := &fakeService{
+	service := &fakeMatchmakingService{
 		cancelSearch: func(ctx context.Context, gotClientID matchmaking.ClientID) error {
 			if err := ctx.Err(); err != nil {
 				t.Errorf("CancelSearch() received cancelled context: %v", err)
@@ -187,7 +187,7 @@ func TestWebsocketHandlerCancelSearchReturnsSearchCancelled(t *testing.T) {
 func TestWebsocketHandlerInvalidJSONKeepsConnectionOpen(t *testing.T) {
 	clientID := newTestClientID(t, "client-test-3")
 	cancelCalls := make(chan struct{}, 1)
-	service := &fakeService{
+	service := &fakeMatchmakingService{
 		cancelSearch: func(context.Context, matchmaking.ClientID) error {
 			cancelCalls <- struct{}{}
 			return nil
@@ -245,7 +245,7 @@ func TestWebsocketHandlerInvalidJSONKeepsConnectionOpen(t *testing.T) {
 func TestWebsocketHandlerDisconnectCancelsActiveSearch(t *testing.T) {
 	clientID := newTestClientID(t, "client-disconnect-1")
 	cancelCalls := make(chan cancelSearchCall, 1)
-	service := &fakeService{
+	service := &fakeMatchmakingService{
 		findPartner: func(context.Context, matchmaking.WaitingUser) (matchmakingservice.MatchResult, error) {
 			return matchmakingservice.MatchResult{Matched: false}, nil
 		},
@@ -530,7 +530,7 @@ func TestWebsocketHandlerMatchDeliveryFailureClosesCreatedRoom(t *testing.T) {
 	closeCalls := make(chan room.RoomID, 1)
 
 	partner := newTestWaitingUser(t, partnerClientID, matchmaking.LanguageCodeEN, matchmaking.LanguageCodeRU)
-	matchmakingService := &fakeService{
+	matchmakingService := &fakeMatchmakingService{
 		findPartner: func(context.Context, matchmaking.WaitingUser) (matchmakingservice.MatchResult, error) {
 			return matchmakingservice.MatchResult{Matched: true, Partner: partner}, nil
 		},

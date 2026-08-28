@@ -59,6 +59,19 @@ func TestNewRoomID(t *testing.T) {
 	}
 }
 
+func TestRoomIDIsEqual(t *testing.T) {
+	roomID := mustRoomID(t, "room-1")
+	sameRoomID := mustRoomID(t, " room-1 ")
+	differentRoomID := mustRoomID(t, "room-2")
+
+	if !roomID.IsEqual(sameRoomID) {
+		t.Error("IsEqual() = false for equal room IDs, want true")
+	}
+	if roomID.IsEqual(differentRoomID) {
+		t.Error("IsEqual() = true for different room IDs, want false")
+	}
+}
+
 func TestNewConnectedClientsPair(t *testing.T) {
 	firstClientID := mustClientID(t, "client-1")
 	secondClientID := mustClientID(t, "client-2")

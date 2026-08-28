@@ -32,6 +32,10 @@ func (roomID RoomID) Value() string {
 	return roomID.value
 }
 
+func (roomID RoomID) IsEqual(other RoomID) bool {
+	return roomID.value == other.value
+}
+
 type ConnectedClients struct {
 	firstClientID  matchmaking.ClientID
 	secondClientID matchmaking.ClientID
