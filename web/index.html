@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fluent Swap</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <p class="eyebrow">language exchange</p>
+      <h1><span>Fluent</span> Swap</h1>
+      <p class="muted">Найди собеседника и начни языковую практику.</p>
+    </header>
+
+    <section class="card connection">
+      <div>
+        <h2>Соединение</h2>
+        <p id="connection-status" class="status offline" role="status">Не подключено</p>
+      </div>
+      <div class="connection-controls">
+        <label class="field grow">
+          <span>WebSocket URL</span>
+          <input id="socket-url" type="url" value="ws://localhost:9090/ws/matchmaking">
+        </label>
+        <button id="connect-button" class="button secondary" type="button">Подключиться</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="heading">
+        <div><p class="eyebrow">Шаг 1</p><h2>Настройки поиска</h2></div>
+        <p id="search-status" class="muted" role="status">Сначала подключитесь к серверу</p>
+      </div>
+      <form id="search-form" class="search-form">
+        <label class="field">
+          <span>Мой родной язык</span>
+          <select id="native-language">
+            <option value="ru">Русский</option><option value="en">English</option>
+            <option value="de">Deutsch</option><option value="es">Español</option>
+            <option value="fr">Français</option>
+          </select>
+        </label>
+        <b class="swap" aria-hidden="true">⇄</b>
+        <label class="field">
+          <span>Я изучаю</span>
+          <select id="learning-language">
+            <option value="en">English</option><option value="ru">Русский</option>
+            <option value="de">Deutsch</option><option value="es">Español</option>
+            <option value="fr">Français</option>
+          </select>
+        </label>
+        <div class="actions">
+          <button id="find-button" class="button primary" type="submit" disabled>Найти собеседника</button>
+          <button id="cancel-button" class="button ghost" type="button" hidden>Отменить поиск</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="chat-section" class="card" hidden>
+      <div class="heading">
+        <div><p class="eyebrow">Шаг 2</p><h2>Разговор</h2></div>
+        <p class="muted">Комната: <code id="match-id"></code></p>
+      </div>
+      <div id="messages" class="messages" aria-live="polite">
+        <p class="empty">Собеседник найден. Поздоровайтесь!</p>
+      </div>
+      <form id="message-form" class="message-form">
+        <label class="sr-only" for="message-input">Сообщение</label>
+        <textarea id="message-input" rows="2" placeholder="Напишите сообщение..." required></textarea>
+        <button class="button primary" type="submit">Отправить</button>
+      </form>
+      <p class="hint">Enter — отправить, Shift + Enter — новая строка</p>
+    </section>
+
+    <details class="card log">
+      <summary>Журнал WebSocket-событий</summary>
+      <div id="event-log" class="log-content" aria-live="polite"></div>
+    </details>
+  </main>
+  <script src="./app.js" defer></script>
+</body>
+</html>
