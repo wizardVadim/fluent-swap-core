@@ -105,3 +105,20 @@ func (room Room) Clients() ConnectedClients {
 func (room Room) RoomID() RoomID {
 	return room.roomID
 }
+
+func (room Room) OtherClientID(clientID matchmaking.ClientID) (matchmaking.ClientID, error) {
+
+	if !clientID.IsValid() {
+		return matchmaking.ClientID{}, matchmaking.ErrInvalidClientID
+	}
+
+	clients := room.connectedClients
+	if clients.firstClientID.IsEqual(clientID) {
+		return clients.secondClientID, nil
+	}
+	if clients.secondClientID.IsEqual(clientID) {
+		return clients.firstClientID, nil
+	}
+
+	return matchmaking.ClientID{}, ErrClientNotInRoom
+}
