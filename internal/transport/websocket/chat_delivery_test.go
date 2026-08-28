@@ -129,6 +129,42 @@ func TestChatDeliveryFullOutboundUnblocksWhenOperationContextIsCancelled(t *test
 	}
 }
 
+func TestChatDeliveryFullOutboundReturnsWhenEnqueueTimesOut(t *testing.T) {
+	recipientID := newTestClientID(t, "recipient")
+	session := newClientSession(context.Background(), recipientID, nil)
+	session.enqueueTimeout = 10 * time.Millisecond
+	t.Cleanup(session.cancel)
+	for i := 0; i < cap(session.outbound); i++ {
+		session.outbound <- struct{}{}
+	}
+	sessions := NewSessionRegistry()
+	if !sessions.register(session) {
+		t.Fatal("register() = false, want true")
+	}
+	delivery := NewChatDelivery(sessions)
+	roomID := newChatDeliveryTestRoomID(t, "room-1")
+	text := newChatDeliveryTestMessageText(t, "hello")
+
+	done := make(chan error, 1)
+	go func() {
+		done <- delivery.Deliver(
+			context.Background(),
+			recipientID,
+			roomID,
+			text,
+		)
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Deliver() error = %v, want %v", err, context.DeadlineExceeded)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Deliver() did not return after enqueue timeout")
+	}
+}
+
 func newChatDeliveryTestRoomID(t *testing.T, value string) room.RoomID {
 	t.Helper()
 

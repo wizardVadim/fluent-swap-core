@@ -14,6 +14,8 @@ import (
 	"github.com/wizardVadim/fluent-swap-core/internal/features/chat/service"
 )
 
+const maxInboundMessageBytes int64 = 8 * 1024
+
 type WebsocketHandler struct {
 	upgrader           websocket.Upgrader
 	matchmakingService MatchmakingService
@@ -51,6 +53,7 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	conn.SetReadLimit(maxInboundMessageBytes)
 	defer conn.Close()
 
 	clientID, err := h.clientIDGenerator()
@@ -195,6 +198,7 @@ func (h *WebsocketHandler) handleSendMessage(
 
 	if err := h.chatService.SendMessage(session.ctx, session.clientID, roomID, mText); err != nil {
 		var errorDTO Error
+		var closeErr error
 		switch {
 		case errors.Is(err, service.ErrSenderNotInRoom),
 			errors.Is(err, service.ErrRoomMismatch):
@@ -203,6 +207,13 @@ func (h *WebsocketHandler) handleSendMessage(
 				ErrorInvalidMatchID,
 				envelope.RequestID,
 			)
+		case errors.Is(err, service.ErrRecipientUnavailable):
+			errorDTO = NewError(
+				"internal server error",
+				ErrorInternalServerError,
+				envelope.RequestID,
+			)
+			closeErr = h.closeRoomWithTimeout(roomID)
 		default:
 			errorDTO = NewError(
 				"internal server error",
@@ -210,10 +221,9 @@ func (h *WebsocketHandler) handleSendMessage(
 				envelope.RequestID,
 			)
 		}
-		if err := session.send(errorDTO); err != nil {
-			return err
-		}
-		return nil
+		sendErr := session.send(errorDTO)
+
+		return errors.Join(sendErr, closeErr)
 	}
 
 	return nil

@@ -192,11 +192,6 @@ func TestWebsocketHandlerSendMessageMapsServiceErrors(t *testing.T) {
 			wantCode: ErrorInvalidMatchID,
 		},
 		{
-			name:     "recipient unavailable",
-			inputErr: chatservice.ErrRecipientUnavailable,
-			wantCode: ErrorInternalServerError,
-		},
-		{
 			name:     "unknown service error",
 			inputErr: unknownErr,
 			wantCode: ErrorInternalServerError,
@@ -224,6 +219,78 @@ func TestWebsocketHandlerSendMessageMapsServiceErrors(t *testing.T) {
 			assertOutboundError(t, session, requestID, tt.wantCode)
 		})
 	}
+}
+
+func TestWebsocketHandlerRecipientUnavailableClosesRoom(t *testing.T) {
+	clientID := newTestClientID(t, "chat-sender")
+	session := newClientSession(context.Background(), clientID, nil)
+	t.Cleanup(session.cancel)
+
+	const (
+		requestID = "req-recipient-unavailable"
+		matchID   = "room-1"
+	)
+	closeCalls := 0
+	handler := &WebsocketHandler{
+		chatService: &fakeChatService{
+			sendMessage: func(context.Context, matchmaking.ClientID, room.RoomID, chat.MessageText) error {
+				return chatservice.ErrRecipientUnavailable
+			},
+		},
+		roomService: &fakeRoomService{
+			closeRoom: func(ctx context.Context, roomID room.RoomID) error {
+				closeCalls++
+				if err := ctx.Err(); err != nil {
+					t.Errorf("CloseRoom() received inactive context: %v", err)
+				}
+				if roomID.Value() != matchID {
+					t.Errorf("CloseRoom() room ID = %q, want %q", roomID.Value(), matchID)
+				}
+				return nil
+			},
+		},
+	}
+
+	err := handler.handleSendMessage(
+		session,
+		newTestSendMessageEnvelope(t, requestID, matchID, "hello"),
+	)
+	if err != nil {
+		t.Fatalf("handleSendMessage() returned unexpected error: %v", err)
+	}
+	if closeCalls != 1 {
+		t.Errorf("CloseRoom() calls = %d, want 1", closeCalls)
+	}
+	assertOutboundError(t, session, requestID, ErrorInternalServerError)
+}
+
+func TestWebsocketHandlerRecipientUnavailablePreservesRoomCleanupError(t *testing.T) {
+	clientID := newTestClientID(t, "chat-sender")
+	session := newClientSession(context.Background(), clientID, nil)
+	t.Cleanup(session.cancel)
+	cleanupErr := errors.New("room cleanup failed")
+	handler := &WebsocketHandler{
+		chatService: &fakeChatService{
+			sendMessage: func(context.Context, matchmaking.ClientID, room.RoomID, chat.MessageText) error {
+				return chatservice.ErrRecipientUnavailable
+			},
+		},
+		roomService: &fakeRoomService{
+			closeRoom: func(context.Context, room.RoomID) error {
+				return cleanupErr
+			},
+		},
+	}
+
+	const requestID = "req-cleanup-error"
+	err := handler.handleSendMessage(
+		session,
+		newTestSendMessageEnvelope(t, requestID, "room-1", "hello"),
+	)
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("handleSendMessage() error = %v, want %v", err, cleanupErr)
+	}
+	assertOutboundError(t, session, requestID, ErrorInternalServerError)
 }
 
 func TestWebsocketHandlerContinuesAfterInvalidSendMessage(t *testing.T) {
@@ -275,6 +342,34 @@ func TestWebsocketHandlerContinuesAfterInvalidSendMessage(t *testing.T) {
 	case <-chatCalls:
 	case <-time.After(time.Second):
 		t.Fatal("SendMessage() was not called after client error")
+	}
+}
+
+func TestWebsocketHandlerClosesConnectionWhenInboundMessageExceedsLimit(t *testing.T) {
+	clientID := newTestClientID(t, "oversized-message-client")
+	handler := NewWebsocketHandler(
+		&fakeMatchmakingService{},
+		fixedClientIDGenerator(clientID),
+		&fakeRoomService{},
+		NewSessionRegistry(),
+		&fakeChatService{},
+	)
+	conn := openTestConnection(t, handler)
+
+	oversizedMessage := []byte(strings.Repeat("x", int(maxInboundMessageBytes)+1))
+	if err := conn.WriteMessage(gorilla.TextMessage, oversizedMessage); err != nil {
+		t.Fatalf("write oversized message: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	_, _, err := conn.ReadMessage()
+	if err == nil {
+		t.Fatal("ReadMessage() error = nil, want connection close")
+	}
+	if !gorilla.IsCloseError(err, gorilla.CloseMessageTooBig) {
+		t.Fatalf("ReadMessage() error = %v, want close code %d", err, gorilla.CloseMessageTooBig)
 	}
 }
 

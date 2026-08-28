@@ -3,18 +3,22 @@ package websocket
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
 )
 
 const sessionOutboundBufferSize = 16
+const sessionEnqueueTimeout = 10 * time.Second
+const sessionWriteTimeout = 10 * time.Second
 
 type clientSession struct {
 	ctx             context.Context
 	clientID        matchmaking.ClientID
 	conn            *websocket.Conn
 	outbound        chan any
+	enqueueTimeout  time.Duration
 	cancel          context.CancelFunc
 	searchRequestID string
 	mtx             sync.RWMutex
@@ -28,11 +32,12 @@ func newClientSession(
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	session := clientSession{
-		clientID: clientID,
-		conn:     conn,
-		outbound: make(chan any, sessionOutboundBufferSize),
-		cancel:   cancel,
-		ctx:      sessionCtx,
+		clientID:       clientID,
+		conn:           conn,
+		outbound:       make(chan any, sessionOutboundBufferSize),
+		enqueueTimeout: sessionEnqueueTimeout,
+		cancel:         cancel,
+		ctx:            sessionCtx,
 	}
 
 	return &session
@@ -74,11 +79,14 @@ func (session *clientSession) sendWithContext(ctx context.Context, message any) 
 		return err
 	}
 
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, session.enqueueTimeout)
+	defer timeoutCancel()
+
 	select {
 	case <-session.ctx.Done():
 		return session.ctx.Err()
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-timeoutCtx.Done():
+		return timeoutCtx.Err()
 	case session.outbound <- message:
 		return nil
 	}
@@ -94,6 +102,9 @@ func (session *clientSession) writeLoop() {
 			return
 
 		case message := <-session.outbound:
+			if err := session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout)); err != nil {
+				return
+			}
 			if err := session.conn.WriteJSON(message); err != nil {
 				return
 			}
