@@ -59,6 +59,19 @@ func TestNewRoomID(t *testing.T) {
 	}
 }
 
+func TestRoomIDIsEqual(t *testing.T) {
+	roomID := mustRoomID(t, "room-1")
+	sameRoomID := mustRoomID(t, " room-1 ")
+	differentRoomID := mustRoomID(t, "room-2")
+
+	if !roomID.IsEqual(sameRoomID) {
+		t.Error("IsEqual() = false for equal room IDs, want true")
+	}
+	if roomID.IsEqual(differentRoomID) {
+		t.Error("IsEqual() = true for different room IDs, want false")
+	}
+}
+
 func TestNewConnectedClientsPair(t *testing.T) {
 	firstClientID := mustClientID(t, "client-1")
 	secondClientID := mustClientID(t, "client-2")
@@ -136,6 +149,66 @@ func TestNewRoom_RejectsZeroRoomID(t *testing.T) {
 	_, err := room.NewRoom(clients, room.RoomID{})
 	if !errors.Is(err, room.ErrInvalidRoomID) {
 		t.Fatalf("NewRoom() error = %v, want %v", err, room.ErrInvalidRoomID)
+	}
+}
+
+func TestRoomOtherClientID(t *testing.T) {
+	firstClientID := mustClientID(t, "client-1")
+	secondClientID := mustClientID(t, "client-2")
+	otherClientID := mustClientID(t, "client-3")
+	clients, err := room.NewConnectedClientsPair(firstClientID, secondClientID)
+	if err != nil {
+		t.Fatalf("NewConnectedClientsPair() returned unexpected error: %v", err)
+	}
+	targetRoom, err := room.NewRoom(clients, mustRoomID(t, "room-1"))
+	if err != nil {
+		t.Fatalf("NewRoom() returned unexpected error: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		clientID     matchmaking.ClientID
+		wantClientID matchmaking.ClientID
+		wantErr      error
+	}{
+		{
+			name:         "first participant returns second participant",
+			clientID:     firstClientID,
+			wantClientID: secondClientID,
+		},
+		{
+			name:         "second participant returns first participant",
+			clientID:     secondClientID,
+			wantClientID: firstClientID,
+		},
+		{
+			name:     "client outside room",
+			clientID: otherClientID,
+			wantErr:  room.ErrClientNotInRoom,
+		},
+		{
+			name:    "zero client ID",
+			wantErr: matchmaking.ErrInvalidClientID,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotClientID, err := targetRoom.OtherClientID(tt.clientID)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("OtherClientID() error = %v, want %v", err, tt.wantErr)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("OtherClientID() returned unexpected error: %v", err)
+			}
+			if !gotClientID.IsEqual(tt.wantClientID) {
+				t.Errorf("OtherClientID() = %v, want %v", gotClientID, tt.wantClientID)
+			}
+		})
 	}
 }
 

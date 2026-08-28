@@ -8,22 +8,29 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/chat"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/room"
+	"github.com/wizardVadim/fluent-swap-core/internal/features/chat/service"
 )
 
+const maxInboundMessageBytes int64 = 8 * 1024
+
 type WebsocketHandler struct {
-	upgrader          websocket.Upgrader
-	service           Service
-	clientIDGenerator ClientIDGenerator
-	sessions          *sessionRegistry
-	roomService       RoomService
+	upgrader           websocket.Upgrader
+	matchmakingService MatchmakingService
+	clientIDGenerator  ClientIDGenerator
+	sessions           *SessionRegistry
+	roomService        RoomService
+	chatService        ChatService
 }
 
 func NewWebsocketHandler(
-	service Service,
+	matchmakingService MatchmakingService,
 	clientIDGenerator ClientIDGenerator,
 	roomService RoomService,
+	sessions *SessionRegistry,
+	chatService ChatService,
 ) *WebsocketHandler {
 	var upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -31,11 +38,12 @@ func NewWebsocketHandler(
 		},
 	}
 	return &WebsocketHandler{
-		upgrader:          upgrader,
-		clientIDGenerator: clientIDGenerator,
-		service:           service,
-		sessions:          newSessionRegistry(),
-		roomService:       roomService,
+		upgrader:           upgrader,
+		clientIDGenerator:  clientIDGenerator,
+		matchmakingService: matchmakingService,
+		sessions:           sessions,
+		roomService:        roomService,
+		chatService:        chatService,
 	}
 }
 
@@ -45,6 +53,7 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	conn.SetReadLimit(maxInboundMessageBytes)
 	defer conn.Close()
 
 	clientID, err := h.clientIDGenerator()
@@ -125,6 +134,10 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err := h.handleCancelSearch(session, envelope); err != nil {
 				return
 			}
+		case TypeSendMessage:
+			if err := h.handleSendMessage(session, envelope); err != nil {
+				return
+			}
 		default:
 			errorDTO := NewError("unknown message type: "+string(envelope.Type), ErrorUnknownMessageType, envelope.RequestID)
 			if err := session.send(errorDTO); err != nil {
@@ -142,7 +155,7 @@ func (h *WebsocketHandler) cleanUp(session *clientSession) {
 	session.clearSearchRequestID()
 	currentCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = h.service.CancelSearch(currentCtx, session.clientID)
+	_ = h.matchmakingService.CancelSearch(currentCtx, session.clientID)
 	// TODO: log cleanup error when structured logging is added
 	activeRoom, ok, _ := h.roomService.FindRoomByClientID(currentCtx, session.clientID)
 	// TODO: log cleanup error when structured logging is added
@@ -150,6 +163,71 @@ func (h *WebsocketHandler) cleanUp(session *clientSession) {
 		_ = h.closeRoomWithTimeout(activeRoom.RoomID())
 		// TODO: log cleanup error when structured logging is added
 	}
+}
+
+func (h *WebsocketHandler) handleSendMessage(
+	session *clientSession,
+	envelope incomingEnvelope,
+) error {
+	sm, err := incomingEnvelopeToSendMessage(envelope)
+	if err != nil {
+		errorDTO := NewError("invalid send_message payloads", ErrorInvalidPayload, envelope.RequestID)
+		if err := session.send(errorDTO); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	mText, err := chat.NewMessageText(sm.Payload.Text)
+	if err != nil {
+		errorDTO := NewError("invalid send_message payloads", ErrorInvalidPayload, envelope.RequestID)
+		if err := session.send(errorDTO); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	roomID, err := room.NewRoomID(sm.Payload.MatchID)
+	if err != nil {
+		errorDTO := NewError("invalid send_message match_id", ErrorInvalidMatchID, envelope.RequestID)
+		if err := session.send(errorDTO); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := h.chatService.SendMessage(session.ctx, session.clientID, roomID, mText); err != nil {
+		var errorDTO Error
+		var closeErr error
+		switch {
+		case errors.Is(err, service.ErrSenderNotInRoom),
+			errors.Is(err, service.ErrRoomMismatch):
+			errorDTO = NewError(
+				"invalid match ID",
+				ErrorInvalidMatchID,
+				envelope.RequestID,
+			)
+		case errors.Is(err, service.ErrRecipientUnavailable):
+			errorDTO = NewError(
+				"internal server error",
+				ErrorInternalServerError,
+				envelope.RequestID,
+			)
+			closeErr = h.closeRoomWithTimeout(roomID)
+		default:
+			errorDTO = NewError(
+				"internal server error",
+				ErrorInternalServerError,
+				envelope.RequestID,
+			)
+		}
+		sendErr := session.send(errorDTO)
+
+		return errors.Join(sendErr, closeErr)
+	}
+
+	return nil
+
 }
 
 func (h *WebsocketHandler) handleCancelSearch(
@@ -161,7 +239,7 @@ func (h *WebsocketHandler) handleCancelSearch(
 		RequestID: envelope.RequestID,
 	}
 
-	if err := h.service.CancelSearch(session.ctx, session.clientID); err != nil {
+	if err := h.matchmakingService.CancelSearch(session.ctx, session.clientID); err != nil {
 		errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
 		if err := session.send(errorDTO); err != nil {
 			return err
@@ -238,7 +316,7 @@ func (h *WebsocketHandler) handleFindPartner(
 
 	session.setSearchRequestID(fp.RequestID)
 
-	result, err := h.service.FindPartner(session.ctx, wu)
+	result, err := h.matchmakingService.FindPartner(session.ctx, wu)
 	if err != nil {
 		session.clearSearchRequestID()
 		errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
@@ -352,6 +430,26 @@ func (ie incomingEnvelope) validate() error {
 		return errTypeIsEmpty
 	}
 	return nil
+}
+
+func incomingEnvelopeToSendMessagePayload(iep json.RawMessage) (MessagePayload, error) {
+	var smp MessagePayload
+	if err := json.Unmarshal(iep, &smp); err != nil {
+		return MessagePayload{}, err
+	}
+	return smp, nil
+}
+
+func incomingEnvelopeToSendMessage(ie incomingEnvelope) (SendMessage, error) {
+	smp, err := incomingEnvelopeToSendMessagePayload(ie.Payload)
+	if err != nil {
+		return SendMessage{}, err
+	}
+	return SendMessage{
+		Type:      ie.Type,
+		RequestID: ie.RequestID,
+		Payload:   smp,
+	}, nil
 }
 
 func incomingEnvelopePayloadToFindPartnerPayload(iep json.RawMessage) (FindPartnerPayload, error) {
