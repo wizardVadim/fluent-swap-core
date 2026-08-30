@@ -12,6 +12,7 @@ import (
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/matchmaking"
 	"github.com/wizardVadim/fluent-swap-core/internal/core/domains/room"
 	"github.com/wizardVadim/fluent-swap-core/internal/features/chat/service"
+	"go.uber.org/zap"
 )
 
 const maxInboundMessageBytes int64 = 8 * 1024
@@ -23,6 +24,7 @@ type WebsocketHandler struct {
 	sessions           *SessionRegistry
 	roomService        RoomService
 	chatService        ChatService
+	logger             *zap.Logger
 }
 
 func NewWebsocketHandler(
@@ -31,7 +33,12 @@ func NewWebsocketHandler(
 	roomService RoomService,
 	sessions *SessionRegistry,
 	chatService ChatService,
+	logger *zap.Logger,
 ) *WebsocketHandler {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	var upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true
@@ -44,13 +51,17 @@ func NewWebsocketHandler(
 		sessions:           sessions,
 		roomService:        roomService,
 		chatService:        chatService,
+		logger:             logger.Named("websocket"),
 	}
 }
 
 func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		h.logger.Warn("websocket upgrade failed",
+			zap.String("remote_addr", r.RemoteAddr),
+			zap.Error(err),
+		)
 		return
 	}
 	conn.SetReadLimit(maxInboundMessageBytes)
@@ -58,10 +69,9 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	clientID, err := h.clientIDGenerator()
 	if err != nil {
+		h.logger.Error("client ID generation failed", zap.Error(err))
 		errorDTO := NewErrorWithoutRequestID("cannot create client ID", ErrorInternalServerError)
-		if err := conn.WriteJSON(errorDTO); err != nil {
-			return
-		}
+		_ = conn.WriteJSON(errorDTO)
 		return
 	}
 
@@ -70,26 +80,28 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		clientID,
 		conn,
 	)
-
 	if !h.sessions.register(session) {
 		session.cancel()
+		h.logger.Error("client session registration failed",
+			zap.String("client_id", clientID.Value()),
+		)
 		errorDTO := NewErrorWithoutRequestID(
 			"internal server error",
 			ErrorInternalServerError,
 		)
 
-		if err := conn.WriteJSON(errorDTO); err != nil {
-			return
-		}
-
+		_ = conn.WriteJSON(errorDTO)
 		return
 	}
 
 	defer h.cleanUp(session)
+	h.logger.Info("client connected",
+		zap.String("client_id", clientID.Value()),
+		zap.String("remote_addr", r.RemoteAddr),
+	)
 
 	go session.writeLoop()
 
-	//messages reading
 	for {
 		select {
 		case <-session.ctx.Done():
@@ -99,6 +111,12 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		_, message, err := conn.ReadMessage()
 		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				h.logger.Warn("websocket read failed",
+					zap.String("client_id", clientID.Value()),
+					zap.Error(err),
+				)
+			}
 			return
 		}
 
@@ -128,14 +146,17 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch envelope.Type {
 		case TypeFindPartner:
 			if err := h.handleFindPartner(session, envelope); err != nil {
+				h.logDispatchError(session, envelope, err)
 				return
 			}
 		case TypeCancelSearch:
 			if err := h.handleCancelSearch(session, envelope); err != nil {
+				h.logDispatchError(session, envelope, err)
 				return
 			}
 		case TypeSendMessage:
 			if err := h.handleSendMessage(session, envelope); err != nil {
+				h.logDispatchError(session, envelope, err)
 				return
 			}
 		default:
@@ -146,7 +167,15 @@ func (h *WebsocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 	}
+}
 
+func (h *WebsocketHandler) logDispatchError(session *clientSession, envelope incomingEnvelope, err error) {
+	h.logger.Error("websocket message handling failed",
+		zap.String("client_id", session.clientID.Value()),
+		zap.String("request_id", envelope.RequestID),
+		zap.String("message_type", string(envelope.Type)),
+		zap.Error(err),
+	)
 }
 
 func (h *WebsocketHandler) cleanUp(session *clientSession) {
@@ -155,14 +184,29 @@ func (h *WebsocketHandler) cleanUp(session *clientSession) {
 	session.clearSearchRequestID()
 	currentCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = h.matchmakingService.CancelSearch(currentCtx, session.clientID)
-	// TODO: log cleanup error when structured logging is added
-	activeRoom, ok, _ := h.roomService.FindRoomByClientID(currentCtx, session.clientID)
-	// TODO: log cleanup error when structured logging is added
-	if ok {
-		_ = h.closeRoomWithTimeout(activeRoom.RoomID())
-		// TODO: log cleanup error when structured logging is added
+	if err := h.matchmakingService.CancelSearch(currentCtx, session.clientID); err != nil {
+		h.logger.Error("search cleanup failed",
+			zap.String("client_id", session.clientID.Value()),
+			zap.Error(err),
+		)
 	}
+	activeRoom, ok, err := h.roomService.FindRoomByClientID(currentCtx, session.clientID)
+	if err != nil {
+		h.logger.Error("active room lookup during cleanup failed",
+			zap.String("client_id", session.clientID.Value()),
+			zap.Error(err),
+		)
+	}
+	if ok {
+		if err := h.closeRoomWithTimeout(activeRoom.RoomID()); err != nil {
+			h.logger.Error("room cleanup failed",
+				zap.String("client_id", session.clientID.Value()),
+				zap.String("room_id", activeRoom.RoomID().Value()),
+				zap.Error(err),
+			)
+		}
+	}
+	h.logger.Info("client disconnected", zap.String("client_id", session.clientID.Value()))
 }
 
 func (h *WebsocketHandler) handleSendMessage(
@@ -197,6 +241,12 @@ func (h *WebsocketHandler) handleSendMessage(
 	}
 
 	if err := h.chatService.SendMessage(session.ctx, session.clientID, roomID, mText); err != nil {
+		h.logger.Error("chat message delivery failed",
+			zap.String("client_id", session.clientID.Value()),
+			zap.String("request_id", envelope.RequestID),
+			zap.String("room_id", roomID.Value()),
+			zap.Error(err),
+		)
 		var errorDTO Error
 		var closeErr error
 		switch {
@@ -240,6 +290,11 @@ func (h *WebsocketHandler) handleCancelSearch(
 	}
 
 	if err := h.matchmakingService.CancelSearch(session.ctx, session.clientID); err != nil {
+		h.logger.Error("search cancellation failed",
+			zap.String("client_id", session.clientID.Value()),
+			zap.String("request_id", envelope.RequestID),
+			zap.Error(err),
+		)
 		errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
 		if err := session.send(errorDTO); err != nil {
 			return err
@@ -318,6 +373,11 @@ func (h *WebsocketHandler) handleFindPartner(
 
 	result, err := h.matchmakingService.FindPartner(session.ctx, wu)
 	if err != nil {
+		h.logger.Error("partner search failed",
+			zap.String("client_id", session.clientID.Value()),
+			zap.String("request_id", envelope.RequestID),
+			zap.Error(err),
+		)
 		session.clearSearchRequestID()
 		errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
 		if err := session.send(errorDTO); err != nil {
@@ -349,6 +409,12 @@ func (h *WebsocketHandler) handleFindPartner(
 
 		createdRoom, err := h.roomService.CreateRoom(session.ctx, session.clientID, partnerSession.clientID)
 		if err != nil {
+			h.logger.Error("room creation failed",
+				zap.String("client_id", session.clientID.Value()),
+				zap.String("partner_client_id", partnerSession.clientID.Value()),
+				zap.String("request_id", envelope.RequestID),
+				zap.Error(err),
+			)
 			errorDTO := NewError("internal server error", ErrorInternalServerError, envelope.RequestID)
 			var savedErr error
 			if err := session.send(errorDTO); err != nil {
@@ -390,6 +456,12 @@ func (h *WebsocketHandler) handleFindPartner(
 			closeErr := h.closeRoomWithTimeout(createdRoom.RoomID())
 			return errors.Join(err, closeErr)
 		}
+
+		h.logger.Info("match created",
+			zap.String("room_id", createdRoom.RoomID().Value()),
+			zap.String("client_id", session.clientID.Value()),
+			zap.String("partner_client_id", partnerSession.clientID.Value()),
+		)
 
 		return nil
 	}

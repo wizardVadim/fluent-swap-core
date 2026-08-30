@@ -1,6 +1,7 @@
 package logger_pack
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,5 +50,12 @@ func NewLogger(logLevel string) (*zap.Logger, func() error, error) {
 		zap.AddStacktrace(zapcore.ErrorLevel),
 	)
 
-	return logger, logFile.Close, nil
+	closeLogger := func() error {
+		syncErr := logFile.Sync()
+		closeErr := logFile.Close()
+
+		return errors.Join(syncErr, closeErr)
+	}
+
+	return logger, closeLogger, nil
 }

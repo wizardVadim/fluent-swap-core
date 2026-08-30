@@ -2,17 +2,29 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/wizardVadim/fluent-swap-core/internal/app"
 )
 
-func main() {
-	server := app.NewHTTPServer(":9090", 5*time.Second)
+const port = ":9090"
+const timeout = 5 * time.Second
 
-	err := server.ListenAndServe()
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+func main() {
+	application, err := app.New(port, timeout)
+	if err != nil {
+		fmt.Printf("cannot initialize application: %v\n", err)
+		return
+	}
+	defer func() {
+		if err := application.Close(); err != nil {
+			fmt.Printf("close application: %v\n", err)
+		}
+	}()
+
+	if err := application.Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		panic(err)
 	}
 }

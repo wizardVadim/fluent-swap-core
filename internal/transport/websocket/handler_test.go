@@ -18,6 +18,7 @@ import (
 	matchmakingservice "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
 	roomrepository "github.com/wizardVadim/fluent-swap-core/internal/features/room/repository"
 	roomservice "github.com/wizardVadim/fluent-swap-core/internal/features/room/service"
+	"go.uber.org/zap"
 )
 
 type fakeMatchmakingService struct {
@@ -92,6 +93,7 @@ func TestWebsocketHandlerSendMessageCallsChatService(t *testing.T) {
 	request := newTestSendMessageEnvelope(t, "req-chat-1", "room-1", "  hello  ")
 
 	handler := &WebsocketHandler{
+		logger: zap.NewNop(),
 		chatService: &fakeChatService{
 			sendMessage: func(
 				ctx context.Context,
@@ -156,6 +158,7 @@ func TestWebsocketHandlerSendMessageRejectsInvalidDomainPayload(t *testing.T) {
 			session := newClientSession(context.Background(), clientID, nil)
 			t.Cleanup(session.cancel)
 			handler := &WebsocketHandler{
+				logger: zap.NewNop(),
 				chatService: &fakeChatService{sendMessage: func(context.Context, matchmaking.ClientID, room.RoomID, chat.MessageText) error {
 					t.Fatal("SendMessage() called for invalid domain payload")
 					return nil
@@ -204,6 +207,7 @@ func TestWebsocketHandlerSendMessageMapsServiceErrors(t *testing.T) {
 			session := newClientSession(context.Background(), clientID, nil)
 			t.Cleanup(session.cancel)
 			handler := &WebsocketHandler{
+				logger: zap.NewNop(),
 				chatService: &fakeChatService{sendMessage: func(context.Context, matchmaking.ClientID, room.RoomID, chat.MessageText) error {
 					return tt.inputErr
 				}},
@@ -232,6 +236,7 @@ func TestWebsocketHandlerRecipientUnavailableClosesRoom(t *testing.T) {
 	)
 	closeCalls := 0
 	handler := &WebsocketHandler{
+		logger: zap.NewNop(),
 		chatService: &fakeChatService{
 			sendMessage: func(context.Context, matchmaking.ClientID, room.RoomID, chat.MessageText) error {
 				return chatservice.ErrRecipientUnavailable
@@ -270,6 +275,7 @@ func TestWebsocketHandlerRecipientUnavailablePreservesRoomCleanupError(t *testin
 	t.Cleanup(session.cancel)
 	cleanupErr := errors.New("room cleanup failed")
 	handler := &WebsocketHandler{
+		logger: zap.NewNop(),
 		chatService: &fakeChatService{
 			sendMessage: func(context.Context, matchmaking.ClientID, room.RoomID, chat.MessageText) error {
 				return chatservice.ErrRecipientUnavailable
@@ -305,6 +311,7 @@ func TestWebsocketHandlerContinuesAfterInvalidSendMessage(t *testing.T) {
 			chatCalls <- struct{}{}
 			return nil
 		}},
+		nil,
 	)
 	conn := openTestConnection(t, handler)
 
@@ -353,6 +360,7 @@ func TestWebsocketHandlerClosesConnectionWhenInboundMessageExceedsLimit(t *testi
 		&fakeRoomService{},
 		NewSessionRegistry(),
 		&fakeChatService{},
+		nil,
 	)
 	conn := openTestConnection(t, handler)
 
@@ -397,6 +405,7 @@ func TestWebsocketHandlerFindPartnerReturnsSearchWaiting(t *testing.T) {
 		roomService,
 		NewSessionRegistry(),
 		&fakeChatService{},
+		nil,
 	))
 
 	request := FindPartner{
@@ -462,6 +471,7 @@ func TestWebsocketHandlerCancelSearchReturnsSearchCancelled(t *testing.T) {
 		roomService,
 		NewSessionRegistry(),
 		&fakeChatService{},
+		nil,
 	))
 
 	request := CancelSearch{Type: TypeCancelSearch, RequestID: "req-cancel-1"}
@@ -510,6 +520,7 @@ func TestWebsocketHandlerInvalidJSONKeepsConnectionOpen(t *testing.T) {
 		roomService,
 		NewSessionRegistry(),
 		&fakeChatService{},
+		nil,
 	))
 
 	if err := conn.WriteMessage(gorilla.TextMessage, []byte(`{"type":`)); err != nil {
@@ -573,6 +584,7 @@ func TestWebsocketHandlerDisconnectCancelsActiveSearch(t *testing.T) {
 		roomService,
 		NewSessionRegistry(),
 		&fakeChatService{},
+		nil,
 	))
 
 	request := FindPartner{
@@ -639,6 +651,7 @@ func TestWebsocketHandlerMatchFoundNotifiesBothClients(t *testing.T) {
 		roomService,
 		NewSessionRegistry(),
 		&fakeChatService{},
+		nil,
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -714,6 +727,7 @@ func TestWebsocketHandlerMatchedClientsRelayMessagesBothWays(t *testing.T) {
 		rooms,
 		sessions,
 		chatService,
+		nil,
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -824,6 +838,7 @@ func TestWebsocketHandlerDisconnectClosesActiveRoom(t *testing.T) {
 		rooms,
 		NewSessionRegistry(),
 		&fakeChatService{},
+		nil,
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -907,6 +922,7 @@ func TestWebsocketHandlerCreateRoomFailureNotifiesBothClients(t *testing.T) {
 		roomService,
 		NewSessionRegistry(),
 		&fakeChatService{},
+		nil,
 	)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -974,6 +990,7 @@ func TestWebsocketHandlerMatchDeliveryFailureClosesCreatedRoom(t *testing.T) {
 		nil, roomService,
 		NewSessionRegistry(),
 		&fakeChatService{},
+		nil,
 	)
 
 	currentSession := newClientSession(context.Background(), currentClientID, nil)

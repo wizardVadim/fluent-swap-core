@@ -24,8 +24,6 @@ func TestNewLogger_WritesMessageToFile(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		_ = logger.Sync()
-
 		if err := closeLogger(); err != nil {
 			t.Errorf("close logger: %v", err)
 		}
