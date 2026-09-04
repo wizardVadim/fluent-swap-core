@@ -17,8 +17,10 @@ var removeFromQueueScript = redis.NewScript(removeFromQueueLua)
 const clientStateKeyPrefix = "fluent-swap:queue:client:"
 
 const (
-	removeResultNoop    int64 = 0
-	removeResultRemoved int64 = 1
+	removeResultQueueKeyMissing int64 = -2
+	removeResultInvalidState    int64 = -1
+	removeResultNoop            int64 = 0
+	removeResultRemoved         int64 = 1
 )
 
 type RedisRepository struct {
@@ -52,6 +54,10 @@ func (repository *RedisRepository) RemoveFromQueue(ctx context.Context, clientID
 	switch result {
 	case removeResultNoop, removeResultRemoved:
 		return nil
+	case removeResultQueueKeyMissing:
+		return errQueueKeyMissing
+	case removeResultInvalidState:
+		return errInvalidClientState
 	default:
 		return fmt.Errorf("%w: %d", errInvalidRedisResponseCode, result)
 	}

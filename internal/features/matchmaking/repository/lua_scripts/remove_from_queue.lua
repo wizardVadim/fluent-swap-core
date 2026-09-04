@@ -10,12 +10,12 @@ if state == 'matched' then
 end
 
 if state ~= 'waiting' then
-    return redis.error_reply("ERR unknown client state")
+    return -1
 end
 
 local queue_key = redis.call('HGET', client_key, 'queue_key')
 if not queue_key then
-    return redis.error_reply("ERR waiting state without queue_key")
+    return -2
 end
 redis.call('LREM', queue_key, 0, client_id)
 redis.call('DEL', client_key)
