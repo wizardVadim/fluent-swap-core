@@ -252,8 +252,40 @@ application-шагом. Повторный вызов способен верн�
 идемпотентность создания комнаты потребует использовать стабильный reservation
 ID либо сделать room creation идемпотентным отдельно.
 
-## 5. Семантика RemoveFromQueue
+### 4.4 Формат передаваемых значений в Lua-скрипт
 
+| Тип значения | Описание |
+| ------------ | -------- |
+| `KEYS[1]` | Ключ для поиска в индексе `clientKey` - `fluent-swap:queue:client:{client_id_1}` |
+| `KEYS[2]` | Ключ для поиска в зеркальной языковой очереди `partnerQueueKey` - `fluent-swap:queue:{learning}:{native}` |
+| `KEYS[3]` | Ключ очереди текущего клиента `queueKey` - `fluent-swap:queue:{native}:{learning}` |
+| `ARGV[1]` | Идентификатор текущего клиента `clientID` - string |
+| `ARGV[2]` | Время ожидания в очереди `waitingTTL` в секундах - integer, must be positive and valid |
+| `ARGV[3]` | Время жизни маркера `Matched` - `matchedTTL` в секундах - integer, must be positive and valid |
+| `ARGV[4]` | Префикс ключа для создания индекса партнера `clientIndexPrefix` - `fluent-swap:queue:client:` |
+
+Оба `TTL` проверяются до первой операции, изменяющей Redis.
+
+### 4.5 Формат ответов Lua-скрипта
+
+| Сценарий | Результат |
+|---|---|
+| Клиент добавлен в очередь | `{0}` |
+| Клиент уже ожидает с той же языковой парой | `{0}` |
+| Клиент уже ожидает с другой языковой парой | `{-1}` |
+| В marker `matched` отсутствуют или пустые обязательные поля партнера `partner_client_id` и\или `partner_queue_key` | `{-2}` |
+| В marker `waiting` отсутствует `queue_key` или пустой | `{-2}` |
+| `client_key` существует, но поле `state` отсутствует, пустое или содержит неизвестное значение | `{-2}` |
+| Найден партнер | `{1, partnerClientID, partnerQueueKey}` |
+| Уже `MATCHED` | `{1, partnerClientID, partnerQueueKey}` |
+
+При повторе в состоянии `MATCHED` данные партнера берутся из сохраненного marker, новый поиск не выполняется.
+Go-adapter преобразует `{-1}` в `ErrClientAlreadyQueued`. Состояние Redis, TTL и позиция клиента в очереди не изменяются.
+Go-adapter преобразует `{-2}` в `errInvalidClientState`. Состояние Redis, TTL и позиция клиента в очереди не изменяются.
+
+## 5. Семантика RemoveFromQueue
+Сценарий	Ответ Lua	Результат Go
+В marker matched отсутствует или пустое обязательное поле партнёра
 `RemoveFromQueue` получает только `ClientID`, поэтому сначала читает client-key.
 Дальнейшее поведение зависит от состояния:
 
