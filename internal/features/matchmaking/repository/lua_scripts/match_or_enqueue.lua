@@ -53,7 +53,7 @@ while true do
         break
     end
     local potential_partner_index_key = key_prefix_partner_index .. potential_partner_id
-    
+
     local potential_partner_state = redis.call('HGET', potential_partner_index_key, 'state')
     if potential_partner_state == 'waiting' then
         local potential_partner_queue_key = redis.call('HGET', potential_partner_index_key, 'queue_key')
