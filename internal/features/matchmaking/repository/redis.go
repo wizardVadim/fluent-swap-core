@@ -36,11 +36,13 @@ const (
 	matchOrEnqueueWaitingAnotherLanguagePair int64 = -1
 	matchOrEnqueueMatchedState               int64 = 1
 	matchOrEnqueueInvalidState               int64 = -2
+	matchOrEnqueueContinueState              int64 = 2
 )
 
 const (
 	waitingSecondsTTL int = 600
 	matchedSecondsTTL int = 7200
+	stepCount         int = 30
 )
 
 type RedisRepository struct {
@@ -86,99 +88,108 @@ func (repository *RedisRepository) RemoveFromQueue(ctx context.Context, clientID
 }
 
 func (repository *RedisRepository) MatchOrEnqueue(ctx context.Context, wu matchmaking.WaitingUser) (matchmakingservice.MatchResult, error) {
-	if err := ctx.Err(); err != nil {
-		return matchmakingservice.MatchResult{Matched: false}, err
-	}
-
-	partnerLanguagePair, err := matchmaking.NewLanguagePair(wu.LanguagePair().LearningLanguage(), wu.LanguagePair().NativeLanguage())
-	if err != nil {
-		return matchmakingservice.MatchResult{Matched: false}, err
-	}
-
-	partnerQueueKey := fmt.Sprintf("%s%s:%s", queueKeyPrefix, partnerLanguagePair.NativeLanguage().Code(), partnerLanguagePair.LearningLanguage().Code())
-	clientQueueKey := fmt.Sprintf("%s%s:%s", queueKeyPrefix, wu.LanguagePair().NativeLanguage().Code(), wu.LanguagePair().LearningLanguage().Code())
-
-	keys := []string{
-		clientStateKey(wu.ClientID()),
-		partnerQueueKey,
-		clientQueueKey,
-	}
-
-	args := []any{
-		wu.ClientID().Value(),
-		waitingSecondsTTL,
-		matchedSecondsTTL,
-		clientStateKeyPrefix,
-	}
-
-	result, err := matchOrEnqueueScript.Run(ctx, repository.client, keys, args...).Result()
-	if err != nil {
-		return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", err)
-	}
-	values, ok := result.([]any)
-	if !ok {
-		return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
-	}
-	if len(values) < 1 {
-		return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
-	}
-
-	resultCode, ok := values[0].(int64)
-	if !ok {
-		return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
-	}
-
-	switch resultCode {
-	case matchOrEnqueueWaitingState:
-		if len(values) != 1 {
-			return matchmakingservice.MatchResult{}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
-		}
-		return matchmakingservice.MatchResult{}, nil
-	case matchOrEnqueueWaitingAnotherLanguagePair:
-		if len(values) != 1 {
-			return matchmakingservice.MatchResult{}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
-		}
-		return matchmakingservice.MatchResult{}, matchmakingservice.ErrClientAlreadyQueued
-	case matchOrEnqueueInvalidState:
-		if len(values) != 1 {
-			return matchmakingservice.MatchResult{}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
-		}
-		return matchmakingservice.MatchResult{}, errInvalidClientState
-	case matchOrEnqueueMatchedState:
-
-		if len(values) != 3 {
-			return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
+	for {
+		if err := ctx.Err(); err != nil {
+			return matchmakingservice.MatchResult{Matched: false}, err
 		}
 
-		partnerIDString, ok := values[1].(string)
+		partnerLanguagePair, err := matchmaking.NewLanguagePair(wu.LanguagePair().LearningLanguage(), wu.LanguagePair().NativeLanguage())
+		if err != nil {
+			return matchmakingservice.MatchResult{Matched: false}, err
+		}
+
+		partnerQueueKey := fmt.Sprintf("%s%s:%s", queueKeyPrefix, partnerLanguagePair.NativeLanguage().Code(), partnerLanguagePair.LearningLanguage().Code())
+		clientQueueKey := fmt.Sprintf("%s%s:%s", queueKeyPrefix, wu.LanguagePair().NativeLanguage().Code(), wu.LanguagePair().LearningLanguage().Code())
+
+		keys := []string{
+			clientStateKey(wu.ClientID()),
+			partnerQueueKey,
+			clientQueueKey,
+		}
+
+		args := []any{
+			wu.ClientID().Value(),
+			waitingSecondsTTL,
+			matchedSecondsTTL,
+			clientStateKeyPrefix,
+			stepCount,
+		}
+
+		result, err := matchOrEnqueueScript.Run(ctx, repository.client, keys, args...).Result()
+		if err != nil {
+			return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", err)
+		}
+		values, ok := result.([]any)
 		if !ok {
 			return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
 		}
-		partnerQueueKey, ok = values[2].(string)
+		if len(values) < 1 {
+			return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
+		}
+
+		resultCode, ok := values[0].(int64)
 		if !ok {
 			return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
 		}
 
-		partnerLanguagePair, err = languagePairFromQueueKey(partnerQueueKey)
-		if err != nil {
-			return matchmakingservice.MatchResult{Matched: false}, err
+		switch resultCode {
+		case matchOrEnqueueContinueState:
+			if len(values) != 1 {
+				return matchmakingservice.MatchResult{}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
+			}
+			continue
+		case matchOrEnqueueWaitingState:
+			if len(values) != 1 {
+				return matchmakingservice.MatchResult{}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
+			}
+			return matchmakingservice.MatchResult{}, nil
+		case matchOrEnqueueWaitingAnotherLanguagePair:
+			if len(values) != 1 {
+				return matchmakingservice.MatchResult{}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
+			}
+			return matchmakingservice.MatchResult{}, matchmakingservice.ErrClientAlreadyQueued
+		case matchOrEnqueueInvalidState:
+			if len(values) != 1 {
+				return matchmakingservice.MatchResult{}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
+			}
+			return matchmakingservice.MatchResult{}, errInvalidClientState
+		case matchOrEnqueueMatchedState:
+			if len(values) != 3 {
+				return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
+			}
+			return helpMatchOrEnqueueMatchedState(values)
+		default:
+			return matchmakingservice.MatchResult{}, fmt.Errorf("%w: %d", errInvalidRedisResponseCode, resultCode)
 		}
-
-		partnerID, err := matchmaking.NewClientID(partnerIDString)
-		if err != nil {
-			return matchmakingservice.MatchResult{Matched: false}, err
-		}
-
-		partnerUser, err := matchmaking.NewWaitingUser(partnerID, partnerLanguagePair)
-		if err != nil {
-			return matchmakingservice.MatchResult{Matched: false}, err
-		}
-
-		return matchmakingservice.MatchResult{Matched: true, Partner: partnerUser}, nil
-
-	default:
-		return matchmakingservice.MatchResult{}, fmt.Errorf("%w: %d", errInvalidRedisResponseCode, resultCode)
 	}
+}
+
+func helpMatchOrEnqueueMatchedState(values []any) (matchmakingservice.MatchResult, error) {
+	partnerIDString, ok := values[1].(string)
+	if !ok {
+		return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
+	}
+	partnerQueueKey, ok := values[2].(string)
+	if !ok {
+		return matchmakingservice.MatchResult{Matched: false}, fmt.Errorf("match client or enqueue error: %w", errInvalidRedisResult)
+	}
+
+	partnerLanguagePair, err := languagePairFromQueueKey(partnerQueueKey)
+	if err != nil {
+		return matchmakingservice.MatchResult{Matched: false}, err
+	}
+
+	partnerID, err := matchmaking.NewClientID(partnerIDString)
+	if err != nil {
+		return matchmakingservice.MatchResult{Matched: false}, err
+	}
+
+	partnerUser, err := matchmaking.NewWaitingUser(partnerID, partnerLanguagePair)
+	if err != nil {
+		return matchmakingservice.MatchResult{Matched: false}, err
+	}
+
+	return matchmakingservice.MatchResult{Matched: true, Partner: partnerUser}, nil
 }
 
 func clientStateKey(clientID matchmaking.ClientID) string {

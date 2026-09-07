@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	matchmakingservice "github.com/wizardVadim/fluent-swap-core/internal/features/matchmaking/service"
 	"os"
 	"reflect"
@@ -526,7 +527,7 @@ func (f *matchScriptFixture) key(id string) string {
 
 func (f *matchScriptFixture) run(id, own, opposite string, waiting, matched any) (any, error) {
 	f.t.Helper()
-	return f.client.Eval(f.ctx, matchOrEnqueue, []string{f.key(id), opposite, own}, id, waiting, matched, f.prefix).Result()
+	return f.client.Eval(f.ctx, matchOrEnqueue, []string{f.key(id), opposite, own}, id, waiting, matched, f.prefix, stepCount).Result()
 }
 
 func (f *matchScriptFixture) wantResult(id, own, opposite string, want ...any) {
@@ -963,4 +964,158 @@ func TestRedisMatchOrEnqueueConcurrentPartnerSelection(t *testing.T) {
 	f.wantHash(partner, map[string]string{"state": "matched", "partner_client_id": winner, "partner_queue_key": f.forward})
 	f.wantHash(winner, map[string]string{"state": "matched", "partner_client_id": partner, "partner_queue_key": f.reverse})
 	f.wantHash(loser, map[string]string{"state": "waiting", "queue_key": f.forward})
+}
+
+func seedStaleCandidates(t *testing.T, f *matchScriptFixture, count int) []string {
+	t.Helper()
+	ids := make([]string, count)
+	values := make([]any, count)
+	for i := range ids {
+		ids[i] = uuid.NewString()
+		values[i] = ids[i]
+	}
+	// No HASH exists for these IDs, as after TTL expiration.
+	if err := f.client.LPush(f.ctx, f.reverse, values...).Err(); err != nil {
+		t.Fatal(err)
+	}
+	return ids
+}
+
+func TestMatchOrEnqueueLuaContinuationBoundary(t *testing.T) {
+	f := newMatchScriptFixture(t)
+	const limit = 2
+	stale := seedStaleCandidates(t, f, limit+1)
+	got, err := f.client.Eval(f.ctx, matchOrEnqueue, []string{f.key("incoming"), f.reverse, f.forward}, "incoming", 60, 120, f.prefix, limit).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []any{int64(2)}) {
+		t.Fatalf("expected CONTINUE, got %#v", got)
+	}
+	f.wantQueue(f.reverse, stale[limit])
+	f.wantQueue(f.forward)
+	f.wantHash("incoming", map[string]string{})
+}
+
+func TestMatchOrEnqueueLuaInvalidLimit(t *testing.T) {
+	for _, limit := range []any{nil, "", "invalid", 0, -1, 1.5, 101} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			f := newMatchScriptFixture(t)
+			seedStaleCandidates(t, f, 2)
+			key := f.key("incoming")
+			before := f.snapshot()
+			args := []any{"incoming", 60, 120, f.prefix}
+			if limit != nil {
+				args = append(args, limit)
+			}
+			_, err := f.client.Eval(f.ctx, matchOrEnqueue, []string{key, f.reverse, f.forward}, args...).Result()
+			if err == nil {
+				t.Error("expected invalid limit error")
+			} else if !strings.Contains(err.Error(), "expected positive integer") {
+				t.Errorf("expected explicit limit validation error, got %v", err)
+			}
+			if !reflect.DeepEqual(before, f.snapshot()) {
+				t.Error("invalid limit mutated Redis")
+			}
+		})
+	}
+}
+
+func TestRedisMatchOrEnqueueContinuesPastStaleCandidates(t *testing.T) {
+	for _, count := range []int{stepCount - 1, stepCount, 2*stepCount + 1} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			f, repo := newMatchRepositoryFixture(t)
+			incoming, partner := uuid.NewString(), uuid.NewString()
+			f.key(incoming)
+			partnerKey := f.key(partner)
+			seedStaleCandidates(t, f, count)
+			if err := f.client.HSet(f.ctx, partnerKey, "state", "waiting", "queue_key", f.reverse).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.client.Expire(f.ctx, partnerKey, time.Minute).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.client.LPush(f.ctx, f.reverse, partner).Err(); err != nil {
+				t.Fatal(err)
+			}
+			result, err := repo.MatchOrEnqueue(f.ctx, repositoryTestUser(t, incoming, false))
+			expected := repositoryTestUser(t, partner, true)
+			if err != nil || !result.Matched || !reflect.DeepEqual(result.Partner, expected) {
+				t.Fatalf("match after cleanup: %+v, %v", result, err)
+			}
+			f.wantQueue(f.reverse)
+			f.wantQueue(f.forward)
+			f.wantHash(incoming, map[string]string{"state": "matched", "partner_client_id": partner, "partner_queue_key": f.reverse})
+			f.wantHash(partner, map[string]string{"state": "matched", "partner_client_id": incoming, "partner_queue_key": f.forward})
+		})
+	}
+}
+
+func TestRedisMatchOrEnqueueEnqueuesAfterStaleCleanup(t *testing.T) {
+	f, repo := newMatchRepositoryFixture(t)
+	seedStaleCandidates(t, f, 2*stepCount+1)
+	incoming := uuid.NewString()
+	f.key(incoming)
+	result, err := repo.MatchOrEnqueue(f.ctx, repositoryTestUser(t, incoming, false))
+	if err != nil || result.Matched {
+		t.Fatalf("enqueue after cleanup: %+v, %v", result, err)
+	}
+	f.wantQueue(f.reverse)
+	f.wantQueue(f.forward, incoming)
+	f.wantHash(incoming, map[string]string{"state": "waiting", "queue_key": f.forward})
+	f.wantTTL(incoming, time.Duration(waitingSecondsTTL)*time.Second)
+}
+
+// Cancel only after Redis has actually returned CONTINUE; no timing-based sleeps.
+type cancelAfterContinueHook struct {
+	cancel    context.CancelFunc
+	continued bool
+	calls     int
+}
+
+func (h *cancelAfterContinueHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (h *cancelAfterContinueHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+func (h *cancelAfterContinueHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "eval" || cmd.Name() == "evalsha" {
+			h.calls++
+		}
+		err := next(ctx, cmd)
+		if result, ok := cmd.(*redis.Cmd); ok && err == nil {
+			values, ok := result.Val().([]any)
+			if ok && len(values) == 1 && values[0] == int64(2) {
+				h.continued = true
+				h.cancel()
+			}
+		}
+		return err
+	}
+}
+
+func TestRedisMatchOrEnqueueCancellationBetweenBatches(t *testing.T) {
+	f, _ := newMatchRepositoryFixture(t)
+	stale := seedStaleCandidates(t, f, stepCount+1)
+	incoming := uuid.NewString()
+	f.key(incoming)
+	client := mustRedisClient(t)
+	// Load before installing the hook so NOSCRIPT fallback does not affect call count.
+	if _, err := matchOrEnqueueScript.Load(f.ctx, client).Result(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	hook := &cancelAfterContinueHook{cancel: cancel}
+	client.AddHook(hook)
+	_, err := NewRedisRepository(client).MatchOrEnqueue(ctx, repositoryTestUser(t, incoming, false))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation after CONTINUE, got %v", err)
+	}
+	if !hook.continued || hook.calls != 1 {
+		t.Fatalf("continued=%v, script calls=%d; want true, 1", hook.continued, hook.calls)
+	}
+	f.wantQueue(f.reverse, stale[stepCount])
+	f.wantQueue(f.forward)
+	f.wantHash(incoming, map[string]string{})
 }

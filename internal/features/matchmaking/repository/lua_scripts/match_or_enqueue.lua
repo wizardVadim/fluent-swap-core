@@ -44,10 +44,15 @@ if matched_ttl == nil or matched_ttl <= 0 or matched_ttl % 1 ~= 0 then
     return redis.error_reply('invalid matchedTTL: expected positive integer seconds')
 end
 local key_prefix_partner_index = ARGV[4]
+local step_count = tonumber(ARGV[5])
+if step_count == nil or step_count <= 0 or step_count % 1 ~= 0 or step_count > 100 then
+    return redis.error_reply('invalid stepCount: expected positive integer 1..100')
+end
 
 local partner_id = nil
+local full_cycle = false
 
-while true do
+for i = 1, step_count, 1 do
     local potential_partner_id = redis.call('RPOP', partner_queue_key)
     if potential_partner_id == false then
         break
@@ -62,6 +67,14 @@ while true do
             break
         end
     end
+
+    if i == step_count then
+        full_cycle = true
+    end
+end
+
+if full_cycle then
+    return {2}
 end
 
 if not partner_id then
